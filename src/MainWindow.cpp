@@ -147,8 +147,15 @@ void MainWindow::BuildInterface() {
     mouseModeCombo_ = new QComboBox;
     mouseModeCombo_->addItems({"Select peak-fit range", "Zoom / pan"});
     mouseModeCombo_->setToolTip("Selection mode records two fit boundaries. Zoom mode uses the wheel, left-drag zoom, right-drag pan, and double-click reset.");
-    auto* resetView = new QPushButton("Reset view");
-    plotLayout->addWidget(Row({modeLabel, mouseModeCombo_, resetView}));
+    auto* previousView = new QPushButton("Back");
+    auto* zoomOut = new QPushButton("Zoom −");
+    auto* zoomIn = new QPushButton("Zoom +");
+    auto* resetView = new QPushButton("Reset");
+    previousView->setToolTip("Return to the previous axis range");
+    zoomOut->setToolTip("Zoom out around the center of the current view");
+    zoomIn->setToolTip("Zoom in around the center of the current view");
+    resetView->setToolTip("Show the complete spectrum range");
+    plotLayout->addWidget(Row({modeLabel, mouseModeCombo_, previousView, zoomOut, zoomIn, resetView}));
 
     auto* plotSplitter = new QSplitter(Qt::Vertical);
     primaryPlot_ = new SpectrumPlotWidget;
@@ -173,6 +180,9 @@ void MainWindow::BuildInterface() {
 
     connect(resetView, &QPushButton::clicked, primaryPlot_, &SpectrumPlotWidget::ResetView);
     connect(resetView, &QPushButton::clicked, secondaryPlot_, &SpectrumPlotWidget::ResetView);
+    connect(previousView, &QPushButton::clicked, primaryPlot_, &SpectrumPlotWidget::PreviousView);
+    connect(zoomOut, &QPushButton::clicked, primaryPlot_, &SpectrumPlotWidget::ZoomOut);
+    connect(zoomIn, &QPushButton::clicked, primaryPlot_, &SpectrumPlotWidget::ZoomIn);
 
     setStyleSheet(R"(
         QMainWindow { background: #eef1f5; }
@@ -313,7 +323,7 @@ QWidget* MainWindow::BuildCalibrationTab() {
 
     auto* alignment = new QGroupBox("Pre-calibration spectrum alignment");
     auto* alignmentLayout = new QVBoxLayout(alignment);
-    alignmentLayout->addWidget(Hint("Overlay a crystal after intensity-independent peak-pattern mapping."));
+    alignmentLayout->addWidget(Hint("Rough diagnostic overlay after intensity-independent peak-pattern mapping; calibration still refits every mapped peak."));
     alignmentHistogramCombo_ = new QComboBox;
     alignmentCrystalEntry_ = new QSpinBox;
     alignmentCrystalEntry_->setRange(0, 63);
@@ -331,17 +341,13 @@ QWidget* MainWindow::BuildCalibrationTab() {
     layout->addWidget(resultList_);
     auto* showSpectrum = new QPushButton("Show spectrum");
     auto* showFit = new QPushButton("Fit + residuals");
-    connect(showSpectrum, &QPushButton::clicked, this, [this] {
-        const auto* descriptor = DescriptorForCombo(manualHistogramCombo_);
-        const int crystal = CurrentResultCrystal();
-        if (descriptor && crystal >= 0) ShowCrystalSpectrum(crystal, *descriptor);
-    });
+    connect(showSpectrum, &QPushButton::clicked, this, [this] { ShowSelectedResultSpectrum(); });
     connect(showFit, &QPushButton::clicked, this, [this] { ShowSelectedCalibration(); });
     layout->addWidget(Row({showSpectrum, showFit}));
 
-    auto* manual = new QGroupBox("Manual correction for selected result");
-    auto* manualLayout = new QVBoxLayout(manual);
-    manualLayout->addWidget(Hint("Choose a histogram and line, show the crystal spectrum, then click the two fit limits."));
+    manualCorrectionGroup_ = new QGroupBox("Manual correction — select one calibration result");
+    auto* manualLayout = new QVBoxLayout(manualCorrectionGroup_);
+    manualLayout->addWidget(Hint("Corrections below apply only to the single crystal selected in Calibration results."));
     manualHistogramCombo_ = new QComboBox;
     manualSourceCombo_ = new QComboBox;
     manualEnergyList_ = new QListWidget;
@@ -369,7 +375,8 @@ QWidget* MainWindow::BuildCalibrationTab() {
     });
     connect(refit, &QPushButton::clicked, this, [this] { RefitSelectedCrystal(); });
     manualLayout->addWidget(Row({remove, refit}));
-    layout->addWidget(manual);
+    manualCorrectionGroup_->setEnabled(false);
+    layout->addWidget(manualCorrectionGroup_);
     auto* exportButton = new QPushButton("Export results and residuals to CSV...");
     connect(exportButton, &QPushButton::clicked, this, [this] { ExportCsv(); });
     layout->addWidget(exportButton);
@@ -398,10 +405,8 @@ void MainWindow::ConnectActions() {
     });
     connect(resultList_, &QListWidget::currentRowChanged, this, [this] {
         if (updatingWidgets_) return;
-        RefreshManualPeakList();
-        const auto* descriptor = DescriptorForCombo(manualHistogramCombo_);
-        const int crystal = CurrentResultCrystal();
-        if (descriptor && crystal >= 0) ShowCrystalSpectrum(crystal, *descriptor);
+        UpdateManualCorrectionForSelection();
+        ShowSelectedResultSpectrum();
     });
     UpdateInteractionMode();
 }
@@ -573,12 +578,64 @@ void MainWindow::ShowCrystalSpectrum(int crystal, const HistogramDescriptor& des
     displayedCrystal_ = crystal;
     pendingRangeStart_.reset();
     SetSecondaryPlotVisible(false);
-    RedrawDisplayedSpectrum();
+    RedrawDisplayedSpectrum(false);
     SetStatus("Showing crystal " + std::to_string(crystal) +
               ". Select range uses two boundary clicks; Zoom / pan uses wheel, drag, or double-click reset.");
 }
 
-void MainWindow::RedrawDisplayedSpectrum() {
+void MainWindow::ShowSelectedResultSpectrum() {
+    const int crystal = CurrentResultCrystal();
+    const auto result = results_.find(crystal);
+    if (crystal < 0 || result == results_.end()) {
+        SetStatus("Select one calibration result first.");
+        return;
+    }
+
+    const HistogramDescriptor* descriptor = DescriptorForCombo(manualHistogramCombo_);
+    const auto fitCountFor = [&](const std::string& datasetId) {
+        return static_cast<int>(std::count_if(result->second.points.begin(), result->second.points.end(),
+            [&](const CalibrationPoint& point) {
+                return point.datasetId == datasetId && point.peakFit.success;
+            }));
+    };
+
+    // If the currently chosen source has no stored fit for this result, move to
+    // the first source that does. This makes Show spectrum reliably restore the
+    // red fitted peaks instead of opening an unrelated, overlay-free source.
+    if ((!descriptor || fitCountFor(descriptor->id) == 0) && !result->second.points.empty()) {
+        const std::string& datasetId = result->second.points.front().datasetId;
+        const auto found = std::find_if(descriptors_.begin(), descriptors_.end(),
+            [&](const HistogramDescriptor& item) { return item.id == datasetId; });
+        if (found != descriptors_.end()) {
+            const int index = static_cast<int>(std::distance(descriptors_.begin(), found));
+            updatingWidgets_ = true;
+            manualHistogramCombo_->setCurrentIndex(index);
+            updatingWidgets_ = false;
+            descriptor = &descriptors_[index];
+        }
+    }
+    if (!descriptor) {
+        SetStatus("No source histogram is available for the selected result.");
+        return;
+    }
+    ShowCrystalSpectrum(crystal, *descriptor);
+    const int fittedPeaks = fitCountFor(descriptor->id);
+    SetStatus("Showing selected result Crystal " + std::to_string(crystal) + " with " +
+              std::to_string(fittedPeaks) + " stored fitted peak(s) in red.");
+}
+
+void MainWindow::UpdateManualCorrectionForSelection() {
+    const int crystal = CurrentResultCrystal();
+    const bool selected = crystal >= 0 && results_.count(crystal) != 0;
+    manualCorrectionGroup_->setEnabled(selected);
+    manualCorrectionGroup_->setTitle(selected
+        ? QString("Manual correction — Crystal %1 only").arg(crystal, 2, 10, QChar('0'))
+        : QString("Manual correction — select one calibration result"));
+    pendingRangeStart_.reset();
+    RefreshManualPeakList();
+}
+
+void MainWindow::RedrawDisplayedSpectrum(bool preserveView) {
     if (!displayedSpectrum_) return;
     std::vector<PlotSeries> series{HistogramSeries(*displayedSpectrum_, QColor("#2563eb"), "Spectrum")};
     std::vector<PlotMarker> markers;
@@ -612,7 +669,8 @@ void MainWindow::RedrawDisplayedSpectrum() {
         markers.push_back({*pendingRangeStart_, "first fit limit", QColor("#d97706"), true});
     }
     primaryPlot_->SetPlot("Crystal " + std::to_string(displayedCrystal_) + " spectrum",
-                          "Charge", "Counts", std::move(series), std::move(markers));
+                          "Charge", "Counts", std::move(series), std::move(markers),
+                          {preserveView, 0.0});
 }
 
 void MainWindow::UpdateInteractionMode() {
@@ -622,8 +680,8 @@ void MainWindow::UpdateInteractionMode() {
     secondaryPlot_->SetInteractionMode(SpectrumPlotWidget::InteractionMode::ZoomPan);
     if (!selecting) pendingRangeStart_.reset();
     if (displayedSpectrum_) RedrawDisplayedSpectrum();
-    SetStatus(selecting ? "Peak-range mode: click the lower and upper fit limits."
-                        : "Zoom mode: wheel to zoom, left-drag a window, right-drag to pan, double-click to reset.");
+    SetStatus(selecting ? "Peak-range mode: click two fit limits; wheel zoom and right-drag pan remain available."
+                        : "Zoom mode: wheel or buttons zoom, left-drag a window, right-drag pans, double-click resets.");
 }
 
 void MainWindow::HandleRangeClick(double charge) {
@@ -907,7 +965,7 @@ void MainWindow::RefreshResults() {
     if (selectedRow < 0 && resultList_->count() > 0) selectedRow = 0;
     resultList_->setCurrentRow(selectedRow);
     updatingWidgets_ = false;
-    RefreshManualPeakList();
+    UpdateManualCorrectionForSelection();
 }
 
 void MainWindow::ShowSelectedCalibration() {
@@ -933,12 +991,15 @@ void MainWindow::ShowSelectedCalibration() {
         residuals.y.push_back(point.residual);
     }
     const auto [minimum, maximum] = std::minmax_element(points.x.begin(), points.x.end());
+    const double dataWidth = std::max(*maximum - *minimum, 1.0);
+    const double plotMinimum = *minimum - 0.15 * dataWidth;
+    const double plotMaximum = *maximum + 0.15 * dataWidth;
     PlotSeries fit;
     fit.name = "Second-order fit";
     fit.color = QColor("#dc2626");
     fit.width = 2;
     for (int i = 0; i < 240; ++i) {
-        const double charge = *minimum + (*maximum - *minimum) * i / 239.0;
+        const double charge = plotMinimum + (plotMaximum - plotMinimum) * i / 239.0;
         fit.x.push_back(charge);
         fit.y.push_back(result.p0 + result.p1 * charge + result.p2 * charge * charge);
     }
@@ -950,7 +1011,8 @@ void MainWindow::ShowSelectedCalibration() {
     primaryPlot_->SetPlot("Crystal " + std::to_string(crystal) + " calibration",
                           "Charge", "Energy (keV)", {std::move(fit), std::move(points)});
     secondaryPlot_->SetPlot("Residuals — RMS " + FormatNumber(result.residualRms, 3) + " keV",
-                            "Charge", "Energy - fit (keV)", {std::move(residuals)});
+                            "Charge", "Energy - fit (keV)", {std::move(residuals)}, {},
+                            {false, 0.15});
     SetStatus("Crystal " + std::to_string(crystal) + ": " + result.status);
 }
 

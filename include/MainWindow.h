@@ -14,6 +14,7 @@
 
 class QComboBox;
 class QDoubleSpinBox;
+class QGroupBox;
 class QLabel;
 class QListWidget;
 class QSpinBox;
@@ -65,7 +66,9 @@ private:
     const EnergyLine* SelectedEnergy(const QListWidget* list) const;
     void ShowReferenceSpectrum();
     void ShowCrystalSpectrum(int crystal, const HistogramDescriptor& descriptor);
-    void RedrawDisplayedSpectrum();
+    void RedrawDisplayedSpectrum(bool preserveView = true);
+    void ShowSelectedResultSpectrum();
+    void UpdateManualCorrectionForSelection();
     void HandleRangeClick(double charge);
     void AddReferencePeak(const PeakFitResult& fit);
     void AddManualPeak(const PeakFitResult& fit);
@@ -118,6 +121,7 @@ private:
     QComboBox* manualSourceCombo_ = nullptr;
     QListWidget* manualEnergyList_ = nullptr;
     QListWidget* manualPeakList_ = nullptr;
+    QGroupBox* manualCorrectionGroup_ = nullptr;
     QComboBox* mouseModeCombo_ = nullptr;
     SpectrumPlotWidget* primaryPlot_ = nullptr;
     SpectrumPlotWidget* secondaryPlot_ = nullptr;

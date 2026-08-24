@@ -33,7 +33,11 @@ SpectrumPlotWidget::SpectrumPlotWidget(QWidget* parent) : QWidget(parent) {
 
 void SpectrumPlotWidget::SetPlot(std::string title, std::string xLabel,
                                  std::string yLabel, std::vector<PlotSeries> series,
-                                 std::vector<PlotMarker> markers) {
+                                 std::vector<PlotMarker> markers,
+                                 PlotViewOptions options) {
+    const double previousMinimum = viewMinimum_;
+    const double previousMaximum = viewMaximum_;
+    const bool hadData = !series_.empty();
     title_ = std::move(title);
     xLabel_ = std::move(xLabel);
     yLabel_ = std::move(yLabel);
@@ -55,7 +59,18 @@ void SpectrumPlotWidget::SetPlot(std::string title, std::string xLabel,
         fullMinimum_ = 0.0;
         fullMaximum_ = 1.0;
     }
-    ResetView();
+    const double padding = std::max(0.0, options.horizontalPaddingFraction) *
+                           (fullMaximum_ - fullMinimum_);
+    fullMinimum_ -= padding;
+    fullMaximum_ += padding;
+    if (options.preserveView && hadData && previousMaximum > previousMinimum) {
+        viewMinimum_ = previousMinimum;
+        viewMaximum_ = previousMaximum;
+        ClampView();
+        update();
+    } else {
+        ResetView();
+    }
 }
 
 void SpectrumPlotWidget::Clear(const std::string& message) {
@@ -78,7 +93,34 @@ void SpectrumPlotWidget::SetInteractionMode(InteractionMode mode) {
 void SpectrumPlotWidget::ResetView() {
     viewMinimum_ = fullMinimum_;
     viewMaximum_ = fullMaximum_;
+    viewHistory_.clear();
     update();
+}
+
+void SpectrumPlotWidget::ZoomIn() {
+    ZoomAround(0.70, 0.5 * (viewMinimum_ + viewMaximum_), true);
+}
+
+void SpectrumPlotWidget::ZoomOut() {
+    ZoomAround(1.0 / 0.70, 0.5 * (viewMinimum_ + viewMaximum_), true);
+}
+
+void SpectrumPlotWidget::PreviousView() {
+    if (viewHistory_.empty()) return;
+    const auto previous = viewHistory_.back();
+    viewHistory_.pop_back();
+    viewMinimum_ = previous.first;
+    viewMaximum_ = previous.second;
+    ClampView();
+    update();
+}
+
+std::pair<double, double> SpectrumPlotWidget::VisibleXRange() const {
+    return {viewMinimum_, viewMaximum_};
+}
+
+std::pair<double, double> SpectrumPlotWidget::FullXRange() const {
+    return {fullMinimum_, fullMaximum_};
 }
 
 void SpectrumPlotWidget::SetRangeSelectedCallback(std::function<void(double)> callback) {
@@ -244,13 +286,14 @@ void SpectrumPlotWidget::mousePressEvent(QMouseEvent* event) {
     dragStart_ = dragCurrent_ = event->position().toPoint();
     dragButton_ = event->button();
     dragging_ = true;
+    if (dragButton_ == Qt::RightButton) RememberView();
 }
 
 void SpectrumPlotWidget::mouseMoveEvent(QMouseEvent* event) {
     if (!dragging_) return;
     const QPoint previous = dragCurrent_;
     dragCurrent_ = event->position().toPoint();
-    if (mode_ == InteractionMode::ZoomPan && dragButton_ == Qt::RightButton) {
+    if (dragButton_ == Qt::RightButton) {
         const double shift = -(dragCurrent_.x() - previous.x()) /
                              static_cast<double>(std::max(PlotRect().width(), 1)) *
                              (viewMaximum_ - viewMinimum_);
@@ -272,6 +315,7 @@ void SpectrumPlotWidget::mouseReleaseEvent(QMouseEvent* event) {
                std::abs(dragCurrent_.x() - dragStart_.x()) >= 12) {
         const double first = PixelToX(dragStart_.x());
         const double second = PixelToX(dragCurrent_.x());
+        RememberView();
         viewMinimum_ = std::min(first, second);
         viewMaximum_ = std::max(first, second);
         ClampView();
@@ -284,14 +328,31 @@ void SpectrumPlotWidget::mouseReleaseEvent(QMouseEvent* event) {
 void SpectrumPlotWidget::mouseDoubleClickEvent(QMouseEvent*) { ResetView(); }
 
 void SpectrumPlotWidget::wheelEvent(QWheelEvent* event) {
-    if (mode_ != InteractionMode::ZoomPan || series_.empty()) return;
+    if (series_.empty() || !PlotRect().contains(event->position().toPoint())) return;
     const double anchor = PixelToX(event->position().x());
     const double factor = event->angleDelta().y() > 0 ? 0.80 : 1.25;
+    ZoomAround(factor, anchor, true);
+    event->accept();
+}
+
+void SpectrumPlotWidget::ZoomAround(double factor, double anchor, bool remember) {
+    if (series_.empty() || !(factor > 0.0) || !std::isfinite(factor)) return;
+    if (remember) RememberView();
     viewMinimum_ = anchor + (viewMinimum_ - anchor) * factor;
     viewMaximum_ = anchor + (viewMaximum_ - anchor) * factor;
     ClampView();
     update();
-    event->accept();
+}
+
+void SpectrumPlotWidget::RememberView() {
+    if (!viewHistory_.empty()) {
+        const auto& previous = viewHistory_.back();
+        if (std::abs(previous.first - viewMinimum_) < 1e-12 &&
+            std::abs(previous.second - viewMaximum_) < 1e-12) return;
+    }
+    viewHistory_.push_back({viewMinimum_, viewMaximum_});
+    constexpr std::size_t maximumHistory = 40;
+    if (viewHistory_.size() > maximumHistory) viewHistory_.erase(viewHistory_.begin());
 }
 
 void SpectrumPlotWidget::ClampView() {
