@@ -62,6 +62,13 @@ TGLayoutHints* Left(int left = 3, int right = 3, int top = 3, int bottom = 3) {
     return new TGLayoutHints(kLHintsLeft | kLHintsCenterY, left, right, top, bottom);
 }
 
+TGTextButton* CommandButton(TGCompositeFrame* parent, const char* label, Int_t id,
+                            const TGWindow* receiver) {
+    auto* button = new TGTextButton(parent, label, id);
+    button->Associate(receiver);
+    return button;
+}
+
 std::string FormatNumber(double value, int precision = 5) {
     std::ostringstream out;
     out << std::fixed << std::setprecision(precision) << value;
@@ -112,10 +119,11 @@ void MainWindow::BuildDataTab(TGCompositeFrame* parent) {
     auto* layout = new TGVerticalFrame(parent);
     parent->AddFrame(layout, ExpandXY());
 
-    auto* add = new TGTextButton(layout, "Add ROOT file...", kAddFiles);
+    auto* add = CommandButton(layout, "Add ROOT file...", kAddFiles, this);
     layout->AddFrame(add, ExpandX());
     layout->AddFrame(new TGLabel(layout, "Discovered TH2 histograms (select one or more):"), Left());
     histogramList_ = new TGListBox(layout, kHistogramList);
+    histogramList_->Associate(this);
     histogramList_->SetMultipleSelections(kTRUE);
     layout->AddFrame(histogramList_, new TGLayoutHints(kLHintsExpandX, 3, 3, 2, 3));
     histogramList_->Resize(440, 190);
@@ -123,6 +131,7 @@ void MainWindow::BuildDataTab(TGCompositeFrame* parent) {
     auto* axisRow = new TGHorizontalFrame(layout);
     axisRow->AddFrame(new TGLabel(axisRow, "TH2 orientation:"), Left());
     orientationCombo_ = new TGComboBox(axisRow, kOrientation);
+    orientationCombo_->Associate(this);
     orientationCombo_->AddEntry("X = charge, Y = crystal", 1);
     orientationCombo_->AddEntry("X = crystal, Y = charge", 2);
     orientationCombo_->Select(1);
@@ -140,6 +149,7 @@ void MainWindow::BuildDataTab(TGCompositeFrame* parent) {
 
     layout->AddFrame(new TGLabel(layout, "Crystals to calibrate:"), Left());
     crystalList_ = new TGListBox(layout);
+    crystalList_->Associate(this);
     crystalList_->SetMultipleSelections(kTRUE);
     for (int crystal = 0; crystal < 64; ++crystal) {
         crystalList_->AddEntry(("Crystal " + std::to_string(crystal)).c_str(), crystal + 1);
@@ -148,12 +158,12 @@ void MainWindow::BuildDataTab(TGCompositeFrame* parent) {
     crystalList_->Resize(440, 260);
     layout->AddFrame(crystalList_, new TGLayoutHints(kLHintsExpandX, 3, 3, 2, 3));
     auto* crystalButtons = new TGHorizontalFrame(layout);
-    crystalButtons->AddFrame(new TGTextButton(crystalButtons, "Select all", kSelectAllCrystals),
+    crystalButtons->AddFrame(CommandButton(crystalButtons, "Select all", kSelectAllCrystals, this),
                              ExpandX());
-    crystalButtons->AddFrame(new TGTextButton(crystalButtons, "Select none", kSelectNoCrystals),
+    crystalButtons->AddFrame(CommandButton(crystalButtons, "Select none", kSelectNoCrystals, this),
                              ExpandX());
     layout->AddFrame(crystalButtons, ExpandX());
-    layout->AddFrame(new TGTextButton(layout, "Preview reference spectrum", kPreviewReference),
+    layout->AddFrame(CommandButton(layout, "Preview reference spectrum", kPreviewReference, this),
                      ExpandX(3, 3, 8, 3));
 }
 
@@ -166,11 +176,13 @@ void MainWindow::BuildPeaksTab(TGCompositeFrame* parent) {
 
     layout->AddFrame(new TGLabel(layout, "Source histogram:"), Left());
     referenceHistogramCombo_ = new TGComboBox(layout, kReferenceHistogram);
+    referenceHistogramCombo_->Associate(this);
     layout->AddFrame(referenceHistogramCombo_, ExpandX());
-    layout->AddFrame(new TGTextButton(layout, "Show reference spectrum", kPreviewReference), ExpandX());
+    layout->AddFrame(CommandButton(layout, "Show reference spectrum", kPreviewReference, this), ExpandX());
 
     layout->AddFrame(new TGLabel(layout, "Known line for the next click:"), Left());
     energyList_ = new TGListBox(layout, kEnergyList);
+    energyList_->Associate(this);
     energyList_->Resize(440, 180);
     layout->AddFrame(energyList_, new TGLayoutHints(kLHintsExpandX, 3, 3, 2, 3));
 
@@ -180,7 +192,7 @@ void MainWindow::BuildPeaksTab(TGCompositeFrame* parent) {
                                            TGNumberFormat::kNESRealThree,
                                            TGNumberFormat::kNEAPositive);
     custom->AddFrame(customEnergyEntry_, ExpandX());
-    custom->AddFrame(new TGTextButton(custom, "Add", kAddCustomEnergy), Left());
+    custom->AddFrame(CommandButton(custom, "Add", kAddCustomEnergy, this), Left());
     layout->AddFrame(custom, ExpandX());
 
     auto* pickRow = new TGHorizontalFrame(layout);
@@ -193,11 +205,12 @@ void MainWindow::BuildPeaksTab(TGCompositeFrame* parent) {
 
     layout->AddFrame(new TGLabel(layout, "Selected reference peaks:"), Left());
     referencePeakList_ = new TGListBox(layout);
+    referencePeakList_->Associate(this);
     referencePeakList_->Resize(440, 190);
     layout->AddFrame(referencePeakList_, new TGLayoutHints(kLHintsExpandX, 3, 3, 2, 3));
     auto* buttons = new TGHorizontalFrame(layout);
-    buttons->AddFrame(new TGTextButton(buttons, "Remove selected", kRemoveReferencePeak), ExpandX());
-    buttons->AddFrame(new TGTextButton(buttons, "Clear all", kClearReferencePeaks), ExpandX());
+    buttons->AddFrame(CommandButton(buttons, "Remove selected", kRemoveReferencePeak, this), ExpandX());
+    buttons->AddFrame(CommandButton(buttons, "Clear all", kClearReferencePeaks, this), ExpandX());
     layout->AddFrame(buttons, ExpandX());
 }
 
@@ -227,36 +240,40 @@ void MainWindow::BuildCalibrationTab(TGCompositeFrame* parent) {
     residualRow->AddFrame(residualLimitEntry_, Left());
     settings->AddFrame(residualRow, ExpandX());
     layout->AddFrame(settings, ExpandX());
-    layout->AddFrame(new TGTextButton(layout, "Calibrate selected crystals", kRunCalibration),
+    layout->AddFrame(CommandButton(layout, "Calibrate selected crystals", kRunCalibration, this),
                      ExpandX(3, 3, 5, 5));
 
     layout->AddFrame(new TGLabel(layout,
         "Results: [OK/REVIEW/FAIL] crystal | peaks | RMS | p0, p1, p2"), Left());
     resultList_ = new TGListBox(layout, kResultList);
+    resultList_->Associate(this);
     resultList_->Resize(440, 180);
     layout->AddFrame(resultList_, new TGLayoutHints(kLHintsExpandX, 3, 3, 2, 3));
     auto* viewButtons = new TGHorizontalFrame(layout);
-    viewButtons->AddFrame(new TGTextButton(viewButtons, "Show spectrum", kShowSpectrum), ExpandX());
-    viewButtons->AddFrame(new TGTextButton(viewButtons, "Fit + residuals", kShowCalibration), ExpandX());
+    viewButtons->AddFrame(CommandButton(viewButtons, "Show spectrum", kShowSpectrum, this), ExpandX());
+    viewButtons->AddFrame(CommandButton(viewButtons, "Fit + residuals", kShowCalibration, this), ExpandX());
     layout->AddFrame(viewButtons, ExpandX());
 
     auto* manual = new TGGroupFrame(layout, "Manual correction for selected result");
     manual->AddFrame(new TGLabel(manual, "Histogram and energy for next spectrum click:"), Left());
     manualHistogramCombo_ = new TGComboBox(manual, kManualHistogram);
+    manualHistogramCombo_->Associate(this);
     manual->AddFrame(manualHistogramCombo_, ExpandX());
     manualEnergyList_ = new TGListBox(manual, kManualEnergyList);
+    manualEnergyList_->Associate(this);
     manualEnergyList_->Resize(420, 100);
     manual->AddFrame(manualEnergyList_, new TGLayoutHints(kLHintsExpandX, 3, 3, 2, 3));
     manual->AddFrame(new TGLabel(manual, "Peak picking is active while this tab is open."), Left());
     manualPeakList_ = new TGListBox(manual);
+    manualPeakList_->Associate(this);
     manualPeakList_->Resize(420, 90);
     manual->AddFrame(manualPeakList_, new TGLayoutHints(kLHintsExpandX, 3, 3, 2, 3));
     auto* manualButtons = new TGHorizontalFrame(manual);
-    manualButtons->AddFrame(new TGTextButton(manualButtons, "Remove point", kRemoveManualPeak), ExpandX());
-    manualButtons->AddFrame(new TGTextButton(manualButtons, "Refit crystal", kRefitCrystal), ExpandX());
+    manualButtons->AddFrame(CommandButton(manualButtons, "Remove point", kRemoveManualPeak, this), ExpandX());
+    manualButtons->AddFrame(CommandButton(manualButtons, "Refit crystal", kRefitCrystal, this), ExpandX());
     manual->AddFrame(manualButtons, ExpandX());
     layout->AddFrame(manual, ExpandX());
-    layout->AddFrame(new TGTextButton(layout, "Export results and residuals to CSV", kExportCsv),
+    layout->AddFrame(CommandButton(layout, "Export results and residuals to CSV", kExportCsv, this),
                      ExpandX(3, 3, 5, 3));
 }
 
@@ -287,8 +304,8 @@ void MainWindow::PopulateEnergyLines() {
     fill(manualEnergyList_);
 }
 
-Bool_t MainWindow::ProcessMessage(Longptr_t msg, Longptr_t parm1, Longptr_t) {
-    if (GET_MSG(msg) != kC_COMMAND) return TGMainFrame::ProcessMessage(msg, parm1, 0);
+Bool_t MainWindow::ProcessMessage(Longptr_t msg, Longptr_t parm1, Longptr_t parm2) {
+    if (GET_MSG(msg) != kC_COMMAND) return TGMainFrame::ProcessMessage(msg, parm1, parm2);
     if (GET_SUBMSG(msg) == kCM_BUTTON) {
         switch (parm1) {
         case kAddFiles: AddRootFiles(); break;
