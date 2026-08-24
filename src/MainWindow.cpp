@@ -17,6 +17,8 @@
 #include <TLegend.h>
 #include <TLine.h>
 #include <TList.h>
+#include <TLatex.h>
+#include <TBox.h>
 #include <TObjString.h>
 #include <TPad.h>
 #include <TRootEmbeddedCanvas.h>
@@ -89,7 +91,10 @@ MainWindow::MainWindow(const TGWindow* parent, UInt_t width, UInt_t height)
     SetStatus("Add one or more ROOT files to begin.");
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow() {
+    if (canvas_ && canvas_->GetCanvas()) canvas_->GetCanvas()->Clear();
+    displayedSpectrum_.reset();
+}
 
 void MainWindow::CloseWindow() { gApplication->Terminate(0); }
 
@@ -171,7 +176,7 @@ void MainWindow::BuildPeaksTab(TGCompositeFrame* parent) {
     auto* layout = new TGVerticalFrame(parent);
     parent->AddFrame(layout, ExpandXY());
     layout->AddFrame(new TGLabel(layout,
-        "For every source histogram, choose an energy and click its peak\non the reference-crystal spectrum."),
+        "For every source histogram, choose an energy, then click the\nlower and upper limits of its peak-fit interval."),
         Left());
 
     layout->AddFrame(new TGLabel(layout, "Source histogram:"), Left());
@@ -180,7 +185,7 @@ void MainWindow::BuildPeaksTab(TGCompositeFrame* parent) {
     layout->AddFrame(referenceHistogramCombo_, ExpandX());
     layout->AddFrame(CommandButton(layout, "Show reference spectrum", kPreviewReference, this), ExpandX());
 
-    layout->AddFrame(new TGLabel(layout, "Known line for the next click:"), Left());
+    layout->AddFrame(new TGLabel(layout, "Known line for the next interval:"), Left());
     energyList_ = new TGListBox(layout, kEnergyList);
     energyList_->Associate(this);
     energyList_->Resize(440, 180);
@@ -195,13 +200,8 @@ void MainWindow::BuildPeaksTab(TGCompositeFrame* parent) {
     custom->AddFrame(CommandButton(custom, "Add", kAddCustomEnergy, this), Left());
     layout->AddFrame(custom, ExpandX());
 
-    auto* pickRow = new TGHorizontalFrame(layout);
-    pickRow->AddFrame(new TGLabel(pickRow, "Peak picking active; snap window:"), Left());
-    peakWindowEntry_ = new TGNumberEntry(pickRow, 12.0, 6, -1,
-                                         TGNumberFormat::kNESRealOne,
-                                         TGNumberFormat::kNEAPositive);
-    pickRow->AddFrame(peakWindowEntry_, Left());
-    layout->AddFrame(pickRow, ExpandX());
+    layout->AddFrame(new TGLabel(layout,
+        "Peak picking is active: click lower bound, then upper bound."), Left());
 
     layout->AddFrame(new TGLabel(layout, "Selected reference peaks:"), Left());
     referencePeakList_ = new TGListBox(layout);
@@ -255,7 +255,7 @@ void MainWindow::BuildCalibrationTab(TGCompositeFrame* parent) {
     layout->AddFrame(viewButtons, ExpandX());
 
     auto* manual = new TGGroupFrame(layout, "Manual correction for selected result");
-    manual->AddFrame(new TGLabel(manual, "Histogram and energy for next spectrum click:"), Left());
+    manual->AddFrame(new TGLabel(manual, "Histogram and energy for next fit interval:"), Left());
     manualHistogramCombo_ = new TGComboBox(manual, kManualHistogram);
     manualHistogramCombo_->Associate(this);
     manual->AddFrame(manualHistogramCombo_, ExpandX());
@@ -263,7 +263,8 @@ void MainWindow::BuildCalibrationTab(TGCompositeFrame* parent) {
     manualEnergyList_->Associate(this);
     manualEnergyList_->Resize(420, 100);
     manual->AddFrame(manualEnergyList_, new TGLayoutHints(kLHintsExpandX, 3, 3, 2, 3));
-    manual->AddFrame(new TGLabel(manual, "Peak picking is active while this tab is open."), Left());
+    manual->AddFrame(new TGLabel(manual,
+        "Peak picking: click lower bound, then upper bound."), Left());
     manualPeakList_ = new TGListBox(manual);
     manualPeakList_->Associate(this);
     manualPeakList_->Resize(420, 90);
@@ -306,6 +307,7 @@ void MainWindow::PopulateEnergyLines() {
 
 Bool_t MainWindow::ProcessMessage(Longptr_t msg, Longptr_t parm1, Longptr_t parm2) {
     if (GET_MSG(msg) != kC_COMMAND) return TGMainFrame::ProcessMessage(msg, parm1, parm2);
+    if (updatingWidgets_) return kTRUE;
     if (GET_SUBMSG(msg) == kCM_BUTTON) {
         switch (parm1) {
         case kAddFiles: AddRootFiles(); break;
@@ -332,11 +334,15 @@ Bool_t MainWindow::ProcessMessage(Longptr_t msg, Longptr_t parm1, Longptr_t parm
             if (selected > 0 && selected <= static_cast<int>(referencePeaks_.size())) {
                 referencePeaks_.erase(referencePeaks_.begin() + selected - 1);
                 RefreshReferencePeakList();
+                RedrawDisplayedSpectrum();
             }
             break;
         }
         case kClearReferencePeaks:
-            referencePeaks_.clear(); RefreshReferencePeakList(); break;
+            referencePeaks_.clear();
+            RefreshReferencePeakList();
+            RedrawDisplayedSpectrum();
+            break;
         case kRunCalibration: RunCalibration(); break;
         case kShowSpectrum: {
             const int crystal = CurrentResultCrystal();
@@ -355,6 +361,7 @@ Bool_t MainWindow::ProcessMessage(Longptr_t msg, Longptr_t parm1, Longptr_t parm
             if (selected > 0 && selected <= static_cast<int>(indices.size())) {
                 manualPeaks_.erase(manualPeaks_.begin() + indices[selected - 1]);
                 RefreshManualPeakList();
+                RedrawDisplayedSpectrum();
             }
             break;
         }
@@ -371,16 +378,23 @@ Bool_t MainWindow::ProcessMessage(Longptr_t msg, Longptr_t parm1, Longptr_t parm
         }
     } else if (GET_SUBMSG(msg) == kCM_LISTBOX && parm1 == kResultList) {
         RefreshManualPeakList();
+        const int crystal = CurrentResultCrystal();
+        const auto* descriptor = DescriptorForCombo(manualHistogramCombo_);
+        if (crystal >= 0 && descriptor) ShowCrystalSpectrum(crystal, *descriptor);
     }
     return kTRUE;
 }
 
 void MainWindow::AddRootFiles() {
     static const char* fileTypes[] = {"ROOT files", "*.root", "All files", "*", nullptr, nullptr};
-    TGFileInfo info;
+    TGFileInfo info{};
     info.fFileTypes = fileTypes;
     new TGFileDialog(gClient->GetRoot(), this, kFDOpen, &info);
     if (!info.fFilename) return;
+    std::vector<std::string> previouslySelected;
+    for (int index : SelectedDescriptorIndices()) {
+        previouslySelected.push_back(descriptors_[index].id);
+    }
     std::string error;
     auto found = repository_.Discover(info.fFilename, error);
     int added = 0;
@@ -393,6 +407,12 @@ void MainWindow::AddRootFiles() {
         }
     }
     RefreshDatasetWidgets();
+    for (std::size_t index = 0; index < descriptors_.size(); ++index) {
+        if (std::find(previouslySelected.begin(), previouslySelected.end(),
+                      descriptors_[index].id) != previouslySelected.end()) {
+            histogramList_->Select(static_cast<int>(index) + 1, kTRUE);
+        }
+    }
     if (added > 0) {
         const int firstNew = static_cast<int>(descriptors_.size()) - added + 1;
         for (int id = firstNew; id <= static_cast<int>(descriptors_.size()); ++id) {
@@ -405,6 +425,7 @@ void MainWindow::AddRootFiles() {
 }
 
 void MainWindow::RefreshDatasetWidgets() {
+    updatingWidgets_ = true;
     histogramList_->RemoveAll();
     referenceHistogramCombo_->RemoveEntries(0, 999999);
     manualHistogramCombo_->RemoveEntries(0, 999999);
@@ -419,12 +440,13 @@ void MainWindow::RefreshDatasetWidgets() {
         manualHistogramCombo_->AddEntry(descriptor.displayName.c_str(), id);
     }
     if (!descriptors_.empty()) {
-        referenceHistogramCombo_->Select(1);
-        manualHistogramCombo_->Select(1);
+        referenceHistogramCombo_->Select(1, kFALSE);
+        manualHistogramCombo_->Select(1, kFALSE);
     }
     histogramList_->Layout();
     referenceHistogramCombo_->Layout();
     manualHistogramCombo_->Layout();
+    updatingWidgets_ = false;
 }
 
 std::vector<int> MainWindow::SelectedDescriptorIndices() const {
@@ -497,14 +519,113 @@ void MainWindow::ShowCrystalSpectrum(int crystal, const HistogramDescriptor& des
         return;
     }
     auto* rootCanvas = canvas_->GetCanvas();
+    if (displayedSpectrum_) displayedSpectrum_->ResetBit(kCanDelete);
     rootCanvas->Clear();
+    rootCanvas->Modified();
+    rootCanvas->Update();
+    displayedSpectrum_.reset();
+    pendingRangeStart_.reset();
     displayedSpectrum_ = std::move(spectrum);
+    displayedSpectrum_->ResetBit(kCanDelete);
     displayedDatasetId_ = descriptor.id;
     displayedCrystal_ = crystal;
+    RedrawDisplayedSpectrum();
+    SetStatus("Showing crystal " + std::to_string(crystal) +
+              ". Select an energy and click the lower and upper peak limits.");
+}
+
+void MainWindow::RedrawDisplayedSpectrum() {
+    if (!displayedSpectrum_) return;
+    auto* rootCanvas = canvas_->GetCanvas();
+    rootCanvas->Clear();
+    rootCanvas->cd();
+    displayedSpectrum_->ResetBit(kCanDelete);
     displayedSpectrum_->SetLineColor(kBlue + 1);
     displayedSpectrum_->Draw("hist");
+    DrawSpectrumOverlays();
+    rootCanvas->Modified();
     rootCanvas->Update();
-    SetStatus("Showing crystal " + std::to_string(crystal) + ". Click peaks only when picking is enabled.");
+}
+
+void MainWindow::DrawPeakFitOverlay(const PeakFitResult& fit, int color, int lineStyle,
+                                    const std::string& label) {
+    if (!displayedSpectrum_ || !fit.success) return;
+    const double maximum = std::max(displayedSpectrum_->GetMaximum(), 1.0);
+    TBox range(fit.rangeLow, 0.0, fit.rangeHigh, maximum);
+    range.SetFillColorAlpha(color, 0.08);
+    range.SetLineColor(color);
+    range.SetLineStyle(3);
+    range.DrawClone("same");
+
+    std::vector<double> fitX(160), fitY(160);
+    for (std::size_t index = 0; index < fitX.size(); ++index) {
+        fitX[index] = fit.rangeLow + (fit.rangeHigh - fit.rangeLow) *
+                                     static_cast<double>(index) /
+                                     static_cast<double>(fitX.size() - 1);
+        fitY[index] = CalibrationEngine::EvaluateRadwarePeak(fitX[index], fit);
+    }
+    TGraph curve(static_cast<int>(fitX.size()), fitX.data(), fitY.data());
+    curve.SetLineColor(color);
+    curve.SetLineStyle(lineStyle);
+    curve.SetLineWidth(2);
+    curve.DrawClone("L same");
+
+    TLine centroid(fit.centroid, 0.0, fit.centroid, maximum);
+    centroid.SetLineColor(color);
+    centroid.SetLineStyle(lineStyle);
+    centroid.SetLineWidth(2);
+    centroid.DrawClone("same");
+    if (!label.empty()) {
+        TLatex text;
+        text.SetTextColor(color);
+        text.SetTextSize(0.026);
+        text.SetTextAngle(90.0);
+        text.DrawLatex(fit.centroid, 0.70 * maximum, label.c_str());
+    }
+}
+
+void MainWindow::DrawSpectrumOverlays() {
+    if (!displayedSpectrum_) return;
+    if (displayedCrystal_ == ReferenceCrystal()) {
+        for (const auto& peak : referencePeaks_) {
+            if (peak.datasetId == displayedDatasetId_) {
+                DrawPeakFitOverlay(peak.peakFit, kGreen + 2, 2,
+                                   FormatNumber(peak.energy, 1) + " keV");
+            }
+        }
+    }
+    const auto result = results_.find(displayedCrystal_);
+    if (result != results_.end()) {
+        for (const auto& point : result->second.points) {
+            if (point.datasetId == displayedDatasetId_) {
+                DrawPeakFitOverlay(point.peakFit, point.manual ? kMagenta + 1 : kRed + 1,
+                                   point.manual ? 7 : 1,
+                                   FormatNumber(point.energy, 1) + " keV");
+            }
+        }
+    }
+    for (const auto& peak : manualPeaks_) {
+        if (peak.datasetId != displayedDatasetId_ || peak.crystal != displayedCrystal_) continue;
+        const bool alreadyApplied = result != results_.end() &&
+            std::any_of(result->second.points.begin(), result->second.points.end(),
+                [&](const CalibrationPoint& point) {
+                    return point.manual && point.datasetId == peak.datasetId &&
+                           std::abs(point.energy - peak.energy) < 1e-6 &&
+                           std::abs(point.charge - peak.peakFit.centroid) < 1e-6;
+                });
+        if (!alreadyApplied) {
+            DrawPeakFitOverlay(peak.peakFit, kMagenta + 1, 7,
+                               FormatNumber(peak.energy, 1) + " keV");
+        }
+    }
+    if (pendingRangeStart_) {
+        const double maximum = std::max(displayedSpectrum_->GetMaximum(), 1.0);
+        TLine pending(*pendingRangeStart_, 0.0, *pendingRangeStart_, maximum);
+        pending.SetLineColor(kOrange + 7);
+        pending.SetLineStyle(3);
+        pending.SetLineWidth(2);
+        pending.DrawClone("same");
+    }
 }
 
 double MainWindow::ClickCharge(Int_t px) const {
@@ -518,16 +639,37 @@ void MainWindow::OnCanvasEvent(Int_t event, Int_t px, Int_t, TObject*) {
     const double clicked = ClickCharge(px);
     if (clicked < displayedSpectrum_->GetXaxis()->GetXmin() ||
         clicked > displayedSpectrum_->GetXaxis()->GetXmax()) return;
-    const double refined = CalibrationEngine::RefinePeak(
-        *displayedSpectrum_, clicked, std::max(0.1, peakWindowEntry_->GetNumber()));
-    if (tabs_->GetCurrent() == 1) {
-        AddReferencePeak(refined);
-    } else if (tabs_->GetCurrent() == 2) {
-        AddManualPeak(refined);
-    }
+    if (tabs_->GetCurrent() == 1 || tabs_->GetCurrent() == 2) HandleRangeClick(clicked);
 }
 
-void MainWindow::AddReferencePeak(double charge) {
+void MainWindow::HandleRangeClick(double charge) {
+    if (!pendingRangeStart_) {
+        pendingRangeStart_ = charge;
+        RedrawDisplayedSpectrum();
+        SetStatus("Lower peak-fit limit selected at " + FormatNumber(charge, 3) +
+                  ". Click the upper limit.");
+        return;
+    }
+    const double rangeLow = std::min(*pendingRangeStart_, charge);
+    const double rangeHigh = std::max(*pendingRangeStart_, charge);
+    pendingRangeStart_.reset();
+    const double minimumWidth = 12.0 * displayedSpectrum_->GetXaxis()->GetBinWidth(1);
+    if (rangeHigh - rangeLow < minimumWidth) {
+        RedrawDisplayedSpectrum();
+        SetStatus("Peak-fit interval is too narrow; select at least 12 histogram bins.");
+        return;
+    }
+    const auto fit = CalibrationEngine::FitRadwarePeak(*displayedSpectrum_, rangeLow, rangeHigh);
+    if (!fit.success) {
+        RedrawDisplayedSpectrum();
+        SetStatus("Peak fit failed: " + fit.status);
+        return;
+    }
+    if (tabs_->GetCurrent() == 1) AddReferencePeak(fit);
+    else AddManualPeak(fit);
+}
+
+void MainWindow::AddReferencePeak(const PeakFitResult& fit) {
     const auto* energy = SelectedEnergy(energyList_);
     const auto* descriptor = DescriptorForCombo(referenceHistogramCombo_);
     if (!energy || !descriptor || displayedDatasetId_ != descriptor->id ||
@@ -539,15 +681,17 @@ void MainWindow::AddReferencePeak(double charge) {
         [&](const ReferencePeak& peak) {
             return peak.datasetId == descriptor->id && std::abs(peak.energy - energy->energy) < 1e-6;
         });
-    ReferencePeak peak{descriptor->id, charge, energy->energy, energy->label};
+    ReferencePeak peak{descriptor->id, fit.centroid, energy->energy, energy->label, fit};
     if (duplicate == referencePeaks_.end()) referencePeaks_.push_back(std::move(peak));
     else *duplicate = std::move(peak);
     RefreshReferencePeakList();
-    SetStatus("Reference peak: " + FormatNumber(charge, 3) + " charge -> " +
+    RedrawDisplayedSpectrum();
+    SetStatus("RadWare centroid " + FormatNumber(fit.centroid, 3) + " +/- " +
+              FormatNumber(fit.centroidError, 3) + " charge -> " +
               FormatNumber(energy->energy, 3) + " keV.");
 }
 
-void MainWindow::AddManualPeak(double charge) {
+void MainWindow::AddManualPeak(const PeakFitResult& fit) {
     const auto* energy = SelectedEnergy(manualEnergyList_);
     const auto* descriptor = DescriptorForCombo(manualHistogramCombo_);
     const int crystal = CurrentResultCrystal();
@@ -561,11 +705,12 @@ void MainWindow::AddManualPeak(double charge) {
             return peak.datasetId == descriptor->id && peak.crystal == crystal &&
                    std::abs(peak.energy - energy->energy) < 1e-6;
         });
-    ManualPeak peak{descriptor->id, crystal, charge, energy->energy, energy->label};
+    ManualPeak peak{descriptor->id, crystal, fit.centroid, energy->energy, energy->label, fit};
     if (duplicate == manualPeaks_.end()) manualPeaks_.push_back(std::move(peak));
     else *duplicate = std::move(peak);
     RefreshManualPeakList();
-    SetStatus("Manual point added. Click Refit crystal to apply it.");
+    RedrawDisplayedSpectrum();
+    SetStatus("Manual RadWare centroid fitted. Click Refit crystal to apply it.");
 }
 
 void MainWindow::RefreshReferencePeakList() {
@@ -575,8 +720,12 @@ void MainWindow::RefreshReferencePeakList() {
         auto descriptor = std::find_if(descriptors_.begin(), descriptors_.end(),
             [&](const HistogramDescriptor& item) { return item.id == peak.datasetId; });
         const std::string dataset = descriptor == descriptors_.end() ? "missing" : descriptor->displayName;
-        const std::string text = dataset + " | q=" + FormatNumber(peak.charge, 3) +
-                                 " -> " + FormatNumber(peak.energy, 3) + " keV (" + peak.label + ")";
+        const std::string text = dataset + " | [" + FormatNumber(peak.peakFit.rangeLow, 2) +
+                                 ", " + FormatNumber(peak.peakFit.rangeHigh, 2) + "] q=" +
+                                 FormatNumber(peak.charge, 3) + " +/- " +
+                                 FormatNumber(peak.peakFit.centroidError, 3) + " sigma=" +
+                                 FormatNumber(peak.peakFit.sigma, 2) + " -> " +
+                                 FormatNumber(peak.energy, 3) + " keV (" + peak.label + ")";
         referencePeakList_->AddEntry(text.c_str(), static_cast<int>(i) + 1);
     }
     referencePeakList_->Layout();
@@ -588,7 +737,10 @@ void MainWindow::RefreshManualPeakList() {
     int id = 1;
     for (const auto& peak : manualPeaks_) {
         if (peak.crystal != crystal) continue;
-        const std::string text = "q=" + FormatNumber(peak.charge, 3) + " -> " +
+        const std::string text = "[" + FormatNumber(peak.peakFit.rangeLow, 2) + ", " +
+                                 FormatNumber(peak.peakFit.rangeHigh, 2) + "] q=" +
+                                 FormatNumber(peak.charge, 3) + " +/- " +
+                                 FormatNumber(peak.peakFit.centroidError, 3) + " -> " +
                                  FormatNumber(peak.energy, 3) + " keV (" + peak.label + ")";
         manualPeakList_->AddEntry(text.c_str(), id++);
     }
@@ -612,7 +764,8 @@ std::vector<CalibrationPoint> MainWindow::BuildPointsForCrystal(int crystal) {
                   [](const ReferencePeak& a, const ReferencePeak& b) { return a.charge < b.charge; });
         if (crystal == ReferenceCrystal()) {
             for (const auto& ref : references) {
-                points.push_back({descriptor.id, ref.charge, ref.energy, 0.0, false, 0.0});
+                points.push_back({descriptor.id, ref.peakFit.centroid, ref.energy,
+                                  ref.peakFit.centroidError, false, 0.0, ref.peakFit});
             }
             continue;
         }
@@ -625,9 +778,15 @@ std::vector<CalibrationPoint> MainWindow::BuildPointsForCrystal(int crystal) {
         const auto matches = CalibrationEngine::MatchReferencePeaks(*spectrum, referenceCharges, options);
         for (std::size_t i = 0; i < references.size(); ++i) {
             if (i < matches.matched.size() && matches.matched[i]) {
-                const double refined = CalibrationEngine::RefinePeak(
-                    *spectrum, matches.charges[i], std::max(0.1, peakWindowEntry_->GetNumber()));
-                points.push_back({descriptor.id, refined, references[i].energy, 0.0, false, 0.0});
+                const double mappedLow = matches.offset + matches.scale *
+                                                         references[i].peakFit.rangeLow;
+                const double mappedHigh = matches.offset + matches.scale *
+                                                          references[i].peakFit.rangeHigh;
+                const auto fit = CalibrationEngine::FitRadwarePeak(*spectrum, mappedLow, mappedHigh);
+                if (fit.success) {
+                    points.push_back({descriptor.id, fit.centroid, references[i].energy,
+                                      fit.centroidError, false, 0.0, fit});
+                }
             }
         }
     }
@@ -639,7 +798,8 @@ std::vector<CalibrationPoint> MainWindow::BuildPointsForCrystal(int crystal) {
             return point.datasetId == manual.datasetId &&
                    std::abs(point.energy - manual.energy) < 1e-6;
         });
-        CalibrationPoint replacement{manual.datasetId, manual.charge, manual.energy, 0.0, true, 0.0};
+        CalibrationPoint replacement{manual.datasetId, manual.peakFit.centroid, manual.energy,
+                                     manual.peakFit.centroidError, true, 0.0, manual.peakFit};
         if (existing == points.end()) points.push_back(replacement);
         else *existing = replacement;
     }
@@ -693,7 +853,8 @@ void MainWindow::RefitSelectedCrystal() {
     results_[crystal] = CalibrateCrystal(crystal);
     RefreshResults();
     resultList_->Select(crystal + 1);
-    ShowSelectedCalibration();
+    const auto* descriptor = DescriptorForCombo(manualHistogramCombo_);
+    if (descriptor) ShowCrystalSpectrum(crystal, *descriptor);
     SetStatus("Crystal " + std::to_string(crystal) + " refitted with manual overrides.");
 }
 
@@ -722,7 +883,6 @@ void MainWindow::ShowSelectedCalibration() {
         SetStatus(found == results_.end() ? "Select a result first." : found->second.status);
         return;
     }
-    displayedSpectrum_.reset();
     const auto& result = found->second;
     std::vector<double> x, y, residuals;
     for (const auto& point : result.points) {
@@ -731,7 +891,12 @@ void MainWindow::ShowSelectedCalibration() {
         residuals.push_back(point.residual);
     }
     auto* rootCanvas = canvas_->GetCanvas();
+    if (displayedSpectrum_) displayedSpectrum_->ResetBit(kCanDelete);
     rootCanvas->Clear();
+    displayedSpectrum_.reset();
+    displayedDatasetId_.clear();
+    displayedCrystal_ = -1;
+    pendingRangeStart_.reset();
     rootCanvas->Divide(1, 2);
     rootCanvas->cd(1);
     TGraph graph(static_cast<int>(x.size()), x.data(), y.data());
@@ -774,7 +939,7 @@ void MainWindow::ExportCsv() {
         return;
     }
     static const char* fileTypes[] = {"CSV files", "*.csv", "All files", "*", nullptr, nullptr};
-    TGFileInfo info;
+    TGFileInfo info{};
     info.fFileTypes = fileTypes;
     info.fFilename = StrDup("hpge_calibration.csv");
     new TGFileDialog(gClient->GetRoot(), this, kFDSave, &info);
@@ -785,18 +950,23 @@ void MainWindow::ExportCsv() {
         return;
     }
     output << "record,crystal,status,needs_review,p0,p1,p2,chi2,ndf,residual_rms_keV,"
-              "dataset,charge,energy_keV,residual_keV,manual\n";
+              "dataset,charge,energy_keV,residual_keV,manual,charge_error,range_low,range_high,"
+              "peak_sigma,peak_chi2,peak_ndf,tail_fraction,beta,step_fraction\n";
     output << std::setprecision(12);
     for (const auto& [crystal, result] : results_) {
         output << "fit," << crystal << ",\"" << result.status << "\"," << result.needsReview
                << ',' << result.p0 << ',' << result.p1 << ',' << result.p2 << ','
                << result.chi2 << ',' << result.ndf << ',' << result.residualRms
-               << ",,,,,\n";
+               << ",,,,,,,,,,,,,,\n";
         for (const auto& point : result.points) {
             output << "point," << crystal << ",,," << result.p0 << ',' << result.p1 << ','
                    << result.p2 << ",,,," << '"' << point.datasetId << '"' << ','
                    << point.charge << ',' << point.energy << ',' << point.residual << ','
-                   << point.manual << '\n';
+                   << point.manual << ',' << point.chargeError << ','
+                   << point.peakFit.rangeLow << ',' << point.peakFit.rangeHigh << ','
+                   << point.peakFit.sigma << ',' << point.peakFit.chi2 << ','
+                   << point.peakFit.ndf << ',' << point.peakFit.tailFraction << ','
+                   << point.peakFit.beta << ',' << point.peakFit.stepFraction << '\n';
         }
     }
     SetStatus("Exported coefficients and per-peak residuals to " + std::string(info.fFilename));

@@ -57,9 +57,7 @@ int main(int argc, char** argv) {
     FillDataset(co56, {846.771, 1238.282, 1771.351, 2598.459}, random);
     co56.Write();
 
-    output.Write();
     output.Close();
     std::cout << "Wrote " << outputPath << " with two TH2 datasets and 64 crystals.\n";
     return 0;
 }
-

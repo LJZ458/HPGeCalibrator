@@ -15,12 +15,14 @@ The application runs on macOS and Linux anywhere CERN ROOT with GUI support is a
 - Supports both common axis layouts: charge-on-X/crystal-on-Y and the inverse.
 - Provides commonly used Co-60, Co-56, Cs-137, Na-22, K-40, and Tl-208 lines.
 - Accepts arbitrary custom background or contaminant energies.
-- Records reference peaks interactively by clicking the first crystal's spectrum.
+- Records reference peaks by clicking the lower and upper fit limits on the first crystal's spectrum.
+- Fits each selected interval with a RadWare/GF3-style Gaussian, low-energy tail, smoothed step, and quadratic background model; calibration uses the fitted centroid and uncertainty.
+- Draws selected ranges, fitted peak curves, centroids, and energy labels directly over each crystal spectrum.
 - Finds corresponding peaks in the other crystals with `TSpectrum` and an affine peak-pattern mapping, without requiring predefined charge windows.
 - Combines peak points from multiple source histograms into one quadratic fit per crystal.
 - Displays calibration curves and per-line residuals, and flags high-RMS or exactly determined fits for review.
-- Lets the user replace any automatically matched point by clicking the correct peak in a problematic crystal and refitting it.
-- Exports coefficients, fit statistics, calibration points, manual/automatic status, and residuals to CSV.
+- Lets the user replace any automatically matched point by selecting a new range in a problematic crystal and refitting it.
+- Exports coefficients, fit statistics, calibration points, peak-fit parameters, manual/automatic status, and residuals to CSV.
 
 ## Prerequisites
 
@@ -38,9 +40,11 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-The test suite reports ten focused checks separately: peak discovery, peak refinement,
-single- and multi-peak mapping, quadratic fitting, fit validation, recursive histogram
-discovery/cache loading, both TH2 axis orientations, and repository error handling.
+The test suite reports fifteen focused checks separately: peak discovery and refinement,
+single- and multi-peak mapping, RadWare peak fitting and validation, mapped interval fitting,
+quadratic fitting and validation, recursive histogram discovery/cache loading, both TH2 axis
+orientations, repeated multi-file projection/cache cycling, repository error handling, and sample
+ROOT-file generation.
 
 Run the application:
 
@@ -70,9 +74,9 @@ instead of entering ROOT with a null graphics backend.
 ## Calibration workflow
 
 1. In **Data**, add each ROOT file. Select one or more discovered `TH2` histograms, choose the axis orientation, reference crystal, and crystals to calibrate.
-2. In **Reference peaks**, choose the first source histogram and show its reference spectrum. Select a known energy (or add a custom one), then click the corresponding peak. Repeat for all usable lines and all source histograms. Clicking near a peak snaps to its local maximum.
+2. In **Reference peaks**, choose the first source histogram and show its reference spectrum. Select a known energy (or add a custom one), click the lower fit limit, then click the upper fit limit. The selected band, RadWare fit curve, fitted centroid, and energy label remain visible. Repeat for all usable lines and all source histograms.
 3. In **Calibration & review**, adjust peak-search parameters if necessary and calibrate the selected crystals. At least three total reference points are required for a quadratic fit; four or more provide a meaningful residual-based quality check.
-4. Select any `REVIEW` or `FAIL` result. Choose its source histogram and energy, show the spectrum, click the correct peak, and press **Refit crystal**. A manual point replaces the automatic point for that dataset and energy.
+4. Select any `REVIEW` or `FAIL` result. Choose its source histogram and energy, show the spectrum, click the lower and upper limits around the correct peak, and press **Refit crystal**. A manual centroid replaces the automatic point for that dataset and energy. After refitting, the spectrum stays visible with the fitted peak overlays.
 5. Inspect **Fit + residuals**, then export the complete result table to CSV.
 
 ## Histogram convention
@@ -93,6 +97,8 @@ Load both histograms under the `sources` directory. On crystal 0, select the two
 
 ## Calibration output
 
-CSV output contains one `fit` row per crystal followed by one `point` row per calibration line. Fit rows include `p0`, `p1`, `p2`, chi-square, degrees of freedom, residual RMS, and review status. Point rows include dataset identity, measured charge, assigned energy, residual, and whether the point was manually overridden.
+CSV output contains one `fit` row per crystal followed by one `point` row per calibration line. Fit rows include `p0`, `p1`, `p2`, chi-square, degrees of freedom, residual RMS, and review status. Point rows include dataset identity, fitted centroid and uncertainty, selected range, peak sigma, RadWare fit statistics and tail/step parameters, assigned energy, residual, and whether the point was manually overridden.
+
+The peak-shape implementation follows the public RadWare/GF3 model used for gamma-spectrum analysis: a Gaussian photopeak plus a low-energy exponential tail, a smoothed step, and polynomial background. See the [RadWare source repository](https://github.com/radforddc/rw05) and the [GammaSpecAnalysis RadWare fit documentation](https://nucleardata.berkeley.edu/nsd_software/doxy/html/d0/d67/_spectrum_analysis_8cpp.html).
 
 An exactly three-point quadratic has zero degrees of freedom and is marked `REVIEW`, even when its residuals are numerically zero. This is deliberate: such a fit has no independent information with which to assess quality.

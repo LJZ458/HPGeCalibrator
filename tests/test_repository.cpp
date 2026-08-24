@@ -13,17 +13,19 @@ namespace {
 
 class TestRootFile {
 public:
-    TestRootFile() {
-        path_ = std::filesystem::temp_directory_path() / "hpge_repository_functions.root";
+    explicit TestRootFile(const std::string& suffix = "functions",
+                          double chargeX = 42.0, double chargeY = 68.0) {
+        path_ = std::filesystem::temp_directory_path() /
+                ("hpge_repository_" + suffix + ".root");
         TFile file(path_.string().c_str(), "RECREATE");
         auto* nested = file.mkdir("nested");
         nested->cd();
         TH2D chargeOnX("charge_on_x", "charge on x", 100, 0.0, 100.0, 64, 0.0, 64.0);
-        chargeOnX.Fill(42.0, 7.5, 12.0);
+        chargeOnX.Fill(chargeX, 7.5, 12.0);
         chargeOnX.Write();
 
         TH2D chargeOnY("charge_on_y", "charge on y", 64, 0.0, 64.0, 100, 0.0, 100.0);
-        chargeOnY.Fill(9.5, 68.0, 15.0);
+        chargeOnY.Fill(9.5, chargeY, 15.0);
         chargeOnY.Write();
     }
 
@@ -43,7 +45,7 @@ const hpge::HistogramDescriptor* Find(const std::vector<hpge::HistogramDescripto
 }
 
 bool TestDiscoverAndLoad() {
-    TestRootFile testFile;
+    TestRootFile testFile("discover");
     hpge::RootDataRepository repository;
     std::string error;
     const auto discovered = repository.Discover(testFile.Path().string(), error);
@@ -73,7 +75,7 @@ bool TestDiscoverAndLoad() {
 }
 
 bool TestProjectChargeOnX() {
-    TestRootFile testFile;
+    TestRootFile testFile("project_x");
     hpge::RootDataRepository repository;
     std::string error;
     const auto discovered = repository.Discover(testFile.Path().string(), error);
@@ -89,7 +91,7 @@ bool TestProjectChargeOnX() {
 }
 
 bool TestProjectChargeOnY() {
-    TestRootFile testFile;
+    TestRootFile testFile("project_y");
     hpge::RootDataRepository repository;
     std::string error;
     const auto discovered = repository.Discover(testFile.Path().string(), error);
@@ -113,7 +115,7 @@ bool TestErrors() {
         return false;
     }
 
-    TestRootFile testFile;
+    TestRootFile testFile("errors");
     const auto discovered = repository.Discover(testFile.Path().string(), error);
     const auto* descriptor = Find(discovered, "charge_on_x");
     if (!descriptor) return false;
@@ -135,6 +137,38 @@ bool TestErrors() {
     return true;
 }
 
+bool TestMultipleFilesStability() {
+    TestRootFile firstFile("multi_a", 42.0, 68.0);
+    TestRootFile secondFile("multi_b", 57.0, 73.0);
+    hpge::RootDataRepository repository;
+    std::string error;
+    const auto firstItems = repository.Discover(firstFile.Path().string(), error);
+    if (!error.empty()) return false;
+    const auto secondItems = repository.Discover(secondFile.Path().string(), error);
+    if (!error.empty()) return false;
+    const auto* first = Find(firstItems, "charge_on_x");
+    const auto* second = Find(secondItems, "charge_on_x");
+    if (!first || !second || first->id == second->id) {
+        std::cerr << "Multiple files did not produce independent descriptors\n";
+        return false;
+    }
+
+    for (int iteration = 0; iteration < 100; ++iteration) {
+        const auto& descriptor = iteration % 2 == 0 ? *first : *second;
+        const double expected = iteration % 2 == 0 ? 42.0 : 57.0;
+        auto projection = repository.ProjectCrystal(
+            descriptor, 7, hpge::AxisOrientation::ChargeOnX, error);
+        if (!projection || !error.empty() ||
+            std::abs(projection->GetBinCenter(projection->GetMaximumBin()) - expected) >= 1.0) {
+            std::cerr << "Repeated multi-file projection failed at iteration " << iteration
+                      << ": " << error << '\n';
+            return false;
+        }
+        if (iteration % 11 == 10) repository.ClearCache();
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -148,6 +182,7 @@ int main(int argc, char** argv) {
     else if (test == "project-charge-on-x") passed = TestProjectChargeOnX();
     else if (test == "project-charge-on-y") passed = TestProjectChargeOnY();
     else if (test == "repository-errors") passed = TestErrors();
+    else if (test == "multiple-files-stability") passed = TestMultipleFilesStability();
     else {
         std::cerr << "Unknown test case: " << test << '\n';
         return 2;
@@ -155,4 +190,3 @@ int main(int argc, char** argv) {
     if (passed) std::cout << "PASS: " << test << '\n';
     return passed ? 0 : 1;
 }
-

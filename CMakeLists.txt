@@ -38,6 +38,9 @@ if(BUILD_TESTING)
             refine-peak
             match-multiple-peaks
             match-single-peak
+            radware-peak-fit
+            radware-fit-validation
+            mapped-radware-fit
             fit-quadratic
             fit-validation)
         add_test(NAME calibration-${test_case}
@@ -50,10 +53,14 @@ if(BUILD_TESTING)
             discover-and-load
             project-charge-on-x
             project-charge-on-y
+            multiple-files-stability
             repository-errors)
         add_test(NAME repository-${test_case}
                  COMMAND hpge-repository-tests ${test_case})
     endforeach()
+
+    add_test(NAME sample-generator
+             COMMAND hpge-generate-sample ${CMAKE_CURRENT_BINARY_DIR}/hpge_test_sample.root)
 
     if(UNIX AND NOT APPLE)
         add_test(NAME startup-headless-guard COMMAND hpge-calibrator)

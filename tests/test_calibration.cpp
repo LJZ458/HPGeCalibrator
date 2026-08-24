@@ -15,6 +15,15 @@ bool Near(double actual, double expected, double tolerance, const std::string& d
     return false;
 }
 
+hpge::CalibrationPoint MakeCalibrationPoint(double charge, double energy,
+                                            const std::string& dataset = "test") {
+    hpge::CalibrationPoint point;
+    point.datasetId = dataset;
+    point.charge = charge;
+    point.energy = energy;
+    return point;
+}
+
 TH1D MakeSpectrum(const char* name, const std::vector<double>& centers,
                   double scale = 1.0, double offset = 0.0) {
     TH1D histogram(name, name, 4096, 0.0, 4096.0);
@@ -92,6 +101,89 @@ bool TestMatchSinglePeak() {
            Near(match.offset, 25.0, 2.0, "single mapping offset");
 }
 
+bool TestRadwarePeakFit() {
+    hpge::PeakFitResult expected;
+    expected.rangeLow = 850.0;
+    expected.rangeHigh = 1150.0;
+    expected.centroid = 1002.4;
+    expected.sigma = 7.5;
+    expected.height = 1800.0;
+    expected.tailFraction = 0.08;
+    expected.beta = 24.0;
+    expected.stepFraction = 0.015;
+    expected.background0 = 35.0;
+    expected.background1 = 4.0;
+    expected.background2 = 2.0;
+
+    TH1D histogram("radware_fit", "radware_fit", 600, 700.0, 1300.0);
+    for (int bin = 1; bin <= histogram.GetNbinsX(); ++bin) {
+        const double x = histogram.GetBinCenter(bin);
+        double counts = hpge::CalibrationEngine::EvaluateRadwarePeak(x, expected);
+        counts += 0.35 * std::sqrt(std::max(counts, 1.0)) * std::sin(0.37 * bin);
+        histogram.SetBinContent(bin, std::max(counts, 0.0));
+    }
+    histogram.SetEntries(200000.0);
+    const auto fitted = hpge::CalibrationEngine::FitRadwarePeak(
+        histogram, expected.rangeHigh, expected.rangeLow);
+    if (!fitted.success) {
+        std::cerr << "RadWare peak fit failed: " << fitted.status << '\n';
+        return false;
+    }
+    return Near(fitted.centroid, expected.centroid, 0.35, "RadWare centroid") &&
+           Near(fitted.sigma, expected.sigma, 1.5, "RadWare sigma") &&
+           fitted.centroidError > 0.0 && fitted.rangeLow == expected.rangeLow &&
+           fitted.rangeHigh == expected.rangeHigh && fitted.ndf > 0;
+}
+
+bool TestRadwareFitValidation() {
+    TH1D empty("radware_empty", "radware_empty", 100, 0.0, 100.0);
+    const auto invalidRange = hpge::CalibrationEngine::FitRadwarePeak(empty, 20.0, 20.0);
+    if (invalidRange.success || invalidRange.status.find("invalid") == std::string::npos) {
+        std::cerr << "RadWare fit did not reject an invalid interval\n";
+        return false;
+    }
+    const auto tooNarrow = hpge::CalibrationEngine::FitRadwarePeak(empty, 20.0, 25.0);
+    if (tooNarrow.success || tooNarrow.status.find("12 bins") == std::string::npos) {
+        std::cerr << "RadWare fit did not reject a narrow interval\n";
+        return false;
+    }
+    const auto noCounts = hpge::CalibrationEngine::FitRadwarePeak(empty, 20.0, 50.0);
+    if (noCounts.success || noCounts.status.find("no counts") == std::string::npos) {
+        std::cerr << "RadWare fit did not reject an empty interval\n";
+        return false;
+    }
+    return true;
+}
+
+bool TestMappedRadwareFit() {
+    const std::vector<double> reference{600.0, 1200.0, 1850.0, 2700.0};
+    const double scale = 1.08;
+    const double offset = 37.0;
+    auto target = MakeSpectrum("mapped_radware", reference, scale, offset);
+    hpge::CalibrationEngine::SearchOptions options;
+    const auto match = hpge::CalibrationEngine::MatchReferencePeaks(target, reference, options);
+    if (!match.success) {
+        std::cerr << "Could not map the target spectrum before interval fitting\n";
+        return false;
+    }
+    for (std::size_t index = 0; index < reference.size(); ++index) {
+        if (!match.matched[index]) {
+            std::cerr << "Mapped interval is missing reference peak " << index << '\n';
+            return false;
+        }
+        const double low = match.offset + match.scale * (reference[index] - 35.0);
+        const double high = match.offset + match.scale * (reference[index] + 35.0);
+        const auto fit = hpge::CalibrationEngine::FitRadwarePeak(target, low, high);
+        if (!fit.success ||
+            !Near(fit.centroid, offset + scale * reference[index], 1.0,
+                  "mapped RadWare centroid " + std::to_string(index))) {
+            std::cerr << "Mapped RadWare interval fit failed: " << fit.status << '\n';
+            return false;
+        }
+    }
+    return true;
+}
+
 bool TestFitQuadratic() {
     const double p0 = -2.3;
     const double p1 = 0.71;
@@ -99,7 +191,7 @@ bool TestFitQuadratic() {
     std::vector<hpge::CalibrationPoint> points;
     for (double charge : {550.0, 1050.0, 1700.0, 2400.0, 3300.0}) {
         const double energy = p0 + p1 * charge + p2 * charge * charge;
-        points.push_back({"synthetic", charge, energy, 0.0, false, 0.0});
+        points.push_back(MakeCalibrationPoint(charge, energy, "synthetic"));
     }
     const auto fit = hpge::CalibrationEngine::FitSecondOrder(7, points, 0.1);
     if (!fit.success || fit.crystal != 7 || fit.needsReview || fit.ndf != 2) {
@@ -114,7 +206,7 @@ bool TestFitQuadratic() {
 
 bool TestFitValidation() {
     std::vector<hpge::CalibrationPoint> twoPoints{
-        {"test", 100.0, 70.0}, {"test", 200.0, 140.0}};
+        MakeCalibrationPoint(100.0, 70.0), MakeCalibrationPoint(200.0, 140.0)};
     const auto insufficient = hpge::CalibrationEngine::FitSecondOrder(0, twoPoints, 1.0);
     if (insufficient.success || insufficient.status.find("fewer than 3") == std::string::npos) {
         std::cerr << "Fit did not reject fewer than three points\n";
@@ -122,7 +214,8 @@ bool TestFitValidation() {
     }
 
     std::vector<hpge::CalibrationPoint> duplicateCharges{
-        {"test", 100.0, 60.0}, {"test", 100.0, 70.0}, {"test", 100.0, 80.0}};
+        MakeCalibrationPoint(100.0, 60.0), MakeCalibrationPoint(100.0, 70.0),
+        MakeCalibrationPoint(100.0, 80.0)};
     const auto singular = hpge::CalibrationEngine::FitSecondOrder(0, duplicateCharges, 1.0);
     if (singular.success || singular.status.find("not distinct") == std::string::npos) {
         std::cerr << "Fit did not reject identical charges\n";
@@ -130,7 +223,8 @@ bool TestFitValidation() {
     }
 
     std::vector<hpge::CalibrationPoint> exactlyThree{
-        {"test", 100.0, 70.0}, {"test", 200.0, 142.0}, {"test", 300.0, 216.0}};
+        MakeCalibrationPoint(100.0, 70.0), MakeCalibrationPoint(200.0, 142.0),
+        MakeCalibrationPoint(300.0, 216.0)};
     const auto noRedundancy = hpge::CalibrationEngine::FitSecondOrder(0, exactlyThree, 1.0);
     if (!noRedundancy.success || !noRedundancy.needsReview || noRedundancy.ndf != 0) {
         std::cerr << "Exactly determined quadratic was not flagged for review\n";
@@ -138,8 +232,8 @@ bool TestFitValidation() {
     }
 
     std::vector<hpge::CalibrationPoint> noisy{
-        {"test", 100.0, 70.0}, {"test", 200.0, 160.0},
-        {"test", 300.0, 205.0}, {"test", 400.0, 330.0}};
+        MakeCalibrationPoint(100.0, 70.0), MakeCalibrationPoint(200.0, 160.0),
+        MakeCalibrationPoint(300.0, 205.0), MakeCalibrationPoint(400.0, 330.0)};
     const auto review = hpge::CalibrationEngine::FitSecondOrder(0, noisy, 0.1);
     if (!review.success || !review.needsReview || review.residualRms <= 0.1) {
         std::cerr << "High-residual fit was not flagged for review\n";
@@ -161,6 +255,9 @@ int main(int argc, char** argv) {
     else if (test == "refine-peak") passed = TestRefinePeak();
     else if (test == "match-multiple-peaks") passed = TestMatchMultiplePeaks();
     else if (test == "match-single-peak") passed = TestMatchSinglePeak();
+    else if (test == "radware-peak-fit") passed = TestRadwarePeakFit();
+    else if (test == "radware-fit-validation") passed = TestRadwareFitValidation();
+    else if (test == "mapped-radware-fit") passed = TestMappedRadwareFit();
     else if (test == "fit-quadratic") passed = TestFitQuadratic();
     else if (test == "fit-validation") passed = TestFitValidation();
     else {
@@ -170,4 +267,3 @@ int main(int argc, char** argv) {
     if (passed) std::cout << "PASS: " << test << '\n';
     return passed ? 0 : 1;
 }
-

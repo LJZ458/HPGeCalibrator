@@ -23,6 +23,11 @@ public:
     static double RefinePeak(const TH1& histogram, double approximateCharge,
                              double halfWindow);
 
+    static PeakFitResult FitRadwarePeak(const TH1& histogram, double rangeLow,
+                                        double rangeHigh);
+
+    static double EvaluateRadwarePeak(double charge, const PeakFitResult& fit);
+
     static PeakMatchResult MatchReferencePeaks(const TH1& target,
                                                const std::vector<double>& referenceCharges,
                                                const SearchOptions& options);
@@ -33,4 +38,3 @@ public:
 };
 
 } // namespace hpge
-

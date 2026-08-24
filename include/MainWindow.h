@@ -8,6 +8,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -65,6 +66,7 @@ private:
         double charge = 0.0;
         double energy = 0.0;
         std::string label;
+        PeakFitResult peakFit;
     };
 
     void BuildInterface();
@@ -83,8 +85,13 @@ private:
     const EnergyLine* SelectedEnergy(const TGListBox* list) const;
     void ShowReferenceSpectrum();
     void ShowCrystalSpectrum(int crystal, const HistogramDescriptor& descriptor);
-    void AddReferencePeak(double charge);
-    void AddManualPeak(double charge);
+    void RedrawDisplayedSpectrum();
+    void DrawSpectrumOverlays();
+    void DrawPeakFitOverlay(const PeakFitResult& fit, int color, int lineStyle,
+                            const std::string& label);
+    void HandleRangeClick(double charge);
+    void AddReferencePeak(const PeakFitResult& fit);
+    void AddManualPeak(const PeakFitResult& fit);
     void RefreshReferencePeakList();
     void RefreshManualPeakList();
     std::vector<CalibrationPoint> BuildPointsForCrystal(int crystal);
@@ -107,6 +114,8 @@ private:
     std::shared_ptr<TH1D> displayedSpectrum_;
     std::string displayedDatasetId_;
     int displayedCrystal_ = -1;
+    std::optional<double> pendingRangeStart_;
+    bool updatingWidgets_ = false;
 
     TGTab* tabs_ = nullptr;
     TGListBox* histogramList_ = nullptr;
@@ -117,7 +126,6 @@ private:
     TGListBox* energyList_ = nullptr;
     TGNumberEntry* customEnergyEntry_ = nullptr;
     TGListBox* referencePeakList_ = nullptr;
-    TGNumberEntry* peakWindowEntry_ = nullptr;
     TGNumberEntry* sigmaEntry_ = nullptr;
     TGNumberEntry* thresholdEntry_ = nullptr;
     TGNumberEntry* residualLimitEntry_ = nullptr;
