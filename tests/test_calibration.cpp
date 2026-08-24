@@ -95,6 +95,14 @@ TH1D MakeLowStatisticsSpikySpectrum(const char* name,
     return histogram;
 }
 
+void AddGaussianPeak(TH1D& histogram, double center, double amplitude, double sigma) {
+    for (int bin = 1; bin <= histogram.GetNbinsX(); ++bin) {
+        const double x = histogram.GetBinCenter(bin);
+        histogram.SetBinContent(bin, histogram.GetBinContent(bin) +
+            amplitude * std::exp(-0.5 * std::pow((x - center) / sigma, 2)));
+    }
+}
+
 double ChargeForEnergy(double energy, double p0, double p1, double p2) {
     return (-p1 + std::sqrt(p1 * p1 - 4.0 * p2 * (p0 - energy))) / (2.0 * p2);
 }
@@ -313,6 +321,17 @@ bool TestCo56CrystalPatternAlignment() {
                          targetCharges[index], 10.0,
                          "Co-56 mapped charge " + std::to_string(index));
     }
+    if (!accurate) {
+        std::cerr << "Co-56 alignment model="
+                  << (match.quadraticModel ? "quadratic" : "affine")
+                  << " candidates=" << match.referenceCharges.size()
+                  << " coefficients=" << match.offset << ',' << match.scale << ','
+                  << match.quadratic << '\n';
+        for (std::size_t index = 0; index < match.referenceCharges.size(); ++index) {
+            std::cerr << "  " << match.referenceCharges[index] << " -> "
+                      << match.charges[index] << " matched=" << match.matched[index] << '\n';
+        }
+    }
     return accurate;
 }
 
@@ -329,8 +348,8 @@ bool TestLowStatisticsSpikeAlignment() {
         {95, 347, 681, 1137, 1679, 2533, 3187, 3971});
 
     hpge::CalibrationEngine::SearchOptions conservativeOptions;
-    conservativeOptions.alignmentSensitivity =
-        hpge::CalibrationEngine::AlignmentSensitivity::Conservative;
+    conservativeOptions.alignmentSensitivity = 0.15;
+    conservativeOptions.autoTuneAlignmentSensitivity = false;
     const auto conservative = hpge::CalibrationEngine::AlignSpectrumPatterns(
         reference, target, conservativeOptions);
     if (!conservative.success) {
@@ -355,7 +374,8 @@ bool TestLowStatisticsSpikeAlignment() {
     }
 
     hpge::CalibrationEngine::SearchOptions highOptions;
-    highOptions.alignmentSensitivity = hpge::CalibrationEngine::AlignmentSensitivity::High;
+    highOptions.alignmentSensitivity = 1.0;
+    highOptions.autoTuneAlignmentSensitivity = false;
     const auto high = hpge::CalibrationEngine::AlignSpectrumPatterns(reference, target, highOptions);
     if (high.referenceCharges.size() <= conservative.referenceCharges.size()) {
         std::cerr << "Alignment sensitivity switch did not retain additional candidates\n";
@@ -366,6 +386,97 @@ bool TestLowStatisticsSpikeAlignment() {
                 "low-statistics alignment scale") &&
            Near(conservative.offset, expectedOffset, 9.0,
                 "low-statistics alignment offset");
+}
+
+bool TestAdaptiveSpectrumSensitivity() {
+    const std::vector<double> peaks{610.0, 1050.0, 1610.0, 2290.0, 3010.0};
+    const double expectedScale = 1.035;
+    const double expectedOffset = 18.0;
+    auto reference = MakeLowStatisticsSpikySpectrum(
+        "adaptive_low_count_reference", peaks, {16.0, 10.0, 14.0, 9.0, 12.0},
+        1.0, 0.0, {217, 833, 1901, 2777, 3691});
+    auto target = MakeLowStatisticsSpikySpectrum(
+        "adaptive_high_count_target", peaks, {9.0, 17.0, 8.0, 15.0, 11.0},
+        expectedScale, expectedOffset, {143, 719, 1327, 2591, 3529});
+    for (int bin = 1; bin <= target.GetNbinsX(); ++bin) {
+        target.SetBinContent(bin, 10.0 * target.GetBinContent(bin));
+    }
+    target.SetEntries(42000.0);
+
+    hpge::CalibrationEngine::SearchOptions options;
+    options.alignmentSensitivity = 0.35;
+    options.autoTuneAlignmentSensitivity = true;
+    options.alignmentModel = hpge::CalibrationEngine::AlignmentModel::Affine;
+    const auto match = hpge::CalibrationEngine::AlignSpectrumPatterns(reference, target, options);
+    return match.success && !match.quadraticModel &&
+           match.referenceSensitivity > match.targetSensitivity + 0.08 &&
+           Near(match.scale, expectedScale, 0.012, "per-spectrum tuned scale") &&
+           Near(match.offset, expectedOffset, 9.0, "per-spectrum tuned offset");
+}
+
+bool TestQuadraticAlignmentWithIntenseXrays() {
+    const std::vector<double> peaks{620.0, 1080.0, 1650.0, 2380.0, 3150.0};
+    const double expectedScale = 1.025;
+    const double expectedOffset = 21.0;
+    const double expectedQuadratic = 3.2e-5;
+    auto reference = MakeVariableIntensitySpectrum(
+        "quadratic_xray_reference", peaks, {75.0, 42.0, 68.0, 38.0, 55.0},
+        1.0, 0.0);
+    auto target = MakeVariableIntensitySpectrum(
+        "quadratic_xray_target", peaks, {35.0, 82.0, 31.0, 70.0, 40.0},
+        expectedScale, expectedOffset, {}, expectedQuadratic);
+    AddGaussianPeak(reference, 118.0, 22000.0, 3.0);
+    AddGaussianPeak(reference, 162.0, 14000.0, 3.0);
+    AddGaussianPeak(reference, 207.0, 18000.0, 3.0);
+    AddGaussianPeak(target, 137.0, 26000.0, 3.0);
+    AddGaussianPeak(target, 194.0, 17000.0, 3.0);
+
+    hpge::CalibrationEngine::SearchOptions options;
+    options.alignmentSensitivity = 0.5;
+    options.autoTuneAlignmentSensitivity = true;
+    options.alignmentModel = hpge::CalibrationEngine::AlignmentModel::Quadratic;
+    const auto match = hpge::CalibrationEngine::AlignSpectrumPatterns(reference, target, options);
+    if (!match.success || !match.quadraticModel) {
+        std::cerr << "Explicit quadratic alignment failed with intense X-rays\n";
+        return false;
+    }
+    auto affineOptions = options;
+    affineOptions.alignmentModel = hpge::CalibrationEngine::AlignmentModel::Affine;
+    const auto affine = hpge::CalibrationEngine::AlignSpectrumPatterns(
+        reference, target, affineOptions);
+    double affineWorstError = 0.0;
+    for (double peak : peaks) {
+        const double expected = expectedOffset + expectedScale * peak +
+                                expectedQuadratic * peak * peak;
+        affineWorstError = std::max(affineWorstError,
+            std::abs(hpge::CalibrationEngine::MapReferenceCharge(affine, peak) - expected));
+    }
+    if (affine.quadraticModel || affineWorstError < 20.0) {
+        std::cerr << "Quadratic regression is not distinct from affine alignment\n";
+        return false;
+    }
+    const int matched = static_cast<int>(
+        std::count(match.matched.begin(), match.matched.end(), true));
+    bool mapped = matched >= 4 &&
+        Near(match.scale, expectedScale, 0.02, "quadratic X-ray scale") &&
+        Near(match.offset, expectedOffset, 15.0, "quadratic X-ray offset") &&
+        Near(match.quadratic, expectedQuadratic, 6e-6, "quadratic X-ray curvature");
+    for (double peak : peaks) {
+        mapped &= Near(hpge::CalibrationEngine::MapReferenceCharge(match, peak),
+                       expectedOffset + expectedScale * peak +
+                           expectedQuadratic * peak * peak,
+                       9.0, "quadratic X-ray mapped peak");
+    }
+    if (!mapped) {
+        std::cerr << "Quadratic X-ray coefficients=" << match.offset << ',' << match.scale
+                  << ',' << match.quadratic << " candidates="
+                  << match.referenceCharges.size() << '\n';
+        for (std::size_t index = 0; index < match.referenceCharges.size(); ++index) {
+            std::cerr << "  " << match.referenceCharges[index] << " -> "
+                      << match.charges[index] << " matched=" << match.matched[index] << '\n';
+        }
+    }
+    return mapped;
 }
 
 bool TestPatternAlignmentValidation() {
@@ -472,6 +583,8 @@ int main(int argc, char** argv) {
     else if (test == "two-peak-pattern-alignment") passed = TestTwoPeakPatternAlignment();
     else if (test == "co56-crystal-pattern-alignment") passed = TestCo56CrystalPatternAlignment();
     else if (test == "low-statistics-spike-alignment") passed = TestLowStatisticsSpikeAlignment();
+    else if (test == "adaptive-spectrum-sensitivity") passed = TestAdaptiveSpectrumSensitivity();
+    else if (test == "quadratic-xray-alignment") passed = TestQuadraticAlignmentWithIntenseXrays();
     else if (test == "pattern-alignment-validation") passed = TestPatternAlignmentValidation();
     else if (test == "fit-quadratic") passed = TestFitQuadratic();
     else if (test == "fit-validation") passed = TestFitValidation();

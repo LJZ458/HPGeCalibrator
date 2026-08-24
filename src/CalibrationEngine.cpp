@@ -207,39 +207,93 @@ double NearestCandidate(const std::vector<double>& candidates, double expected,
     return best;
 }
 
-std::vector<double> StrongPatternCandidates(const TH1& histogram,
-                                            const CalibrationEngine::SearchOptions& options) {
+struct PatternCandidateSet {
+    std::vector<double> charges;
+    double sensitivity = 0.0;
+};
+
+PatternCandidateSet StrongPatternCandidates(
+    const TH1& histogram, const CalibrationEngine::SearchOptions& options) {
     struct CandidateQuality {
         double charge = 0.0;
         double score = 0.0;
+        int region = 0;
     };
     struct SensitivityPreset {
-        double searchThreshold = 0.015;
-        double maximumCentralFraction = 0.86;
-        double supportNoiseFraction = 0.55;
+        double searchThreshold = 0.01;
+        double maximumCentralFraction = 0.85;
+        double supportNoiseFraction = 0.5;
         int minimumSupportingBins = 1;
         double minimumIntegratedSignificance = 2.0;
-        std::size_t maximumCandidates = 18;
-    } preset;
+        std::size_t maximumCandidates = 16;
+    };
 
-    switch (options.alignmentSensitivity) {
-    case CalibrationEngine::AlignmentSensitivity::Conservative:
-        preset = {0.018, 0.72, 0.75, 2, 3.0, 12};
-        break;
-    case CalibrationEngine::AlignmentSensitivity::Balanced:
-        break;
-    case CalibrationEngine::AlignmentSensitivity::High:
-        preset = {0.004, 0.995, 0.0, 0, 0.5, 24};
-        break;
+    PatternCandidateSet result;
+    const int binCount = histogram.GetNbinsX();
+    if (binCount < 1) return result;
+    std::vector<double> binCounts;
+    binCounts.reserve(binCount);
+    for (int bin = 1; bin <= binCount; ++bin) {
+        binCounts.push_back(std::max(histogram.GetBinContent(bin), 0.0));
+    }
+    const double spectrumMaximum = *std::max_element(binCounts.begin(), binCounts.end());
+    const auto medianPosition = binCounts.begin() +
+        static_cast<std::ptrdiff_t>(binCounts.size() / 2);
+    std::nth_element(binCounts.begin(), medianPosition, binCounts.end());
+    const double spectrumMedian = *medianPosition;
+    int isolatedSpikes = 0;
+    for (int bin = 3; bin <= binCount - 2; ++bin) {
+        const double center = std::max(histogram.GetBinContent(bin) - spectrumMedian, 0.0);
+        const double neighbors =
+            std::max(histogram.GetBinContent(bin - 2) - spectrumMedian, 0.0) +
+            std::max(histogram.GetBinContent(bin - 1) - spectrumMedian, 0.0) +
+            std::max(histogram.GetBinContent(bin + 1) - spectrumMedian, 0.0) +
+            std::max(histogram.GetBinContent(bin + 2) - spectrumMedian, 0.0);
+        if (center > 6.0 * std::sqrt(spectrumMedian + 1.0) &&
+            center / std::max(center + neighbors, 1.0) > 0.72) {
+            ++isolatedSpikes;
+        }
+    }
+    const bool spikeRich = isolatedSpikes > std::max(2, binCount / 1000);
+    double sensitivity = std::clamp(options.alignmentSensitivity, 0.0, 1.0);
+    if (options.autoTuneAlignmentSensitivity) {
+        if (spectrumMedian < 2.0) sensitivity += 0.12;
+        else if (spectrumMedian < 5.0) sensitivity += 0.06;
+        else if (spectrumMedian > 50.0) sensitivity -= 0.05;
+        if (spectrumMaximum > 1000.0 * (spectrumMedian + 1.0)) sensitivity += 0.15;
+        sensitivity = std::clamp(sensitivity, 0.0, 1.0);
+    }
+    result.sensitivity = sensitivity;
+    SensitivityPreset preset;
+    preset.searchThreshold = std::exp(
+        std::log(0.022) * (1.0 - sensitivity) + std::log(0.003) * sensitivity);
+    preset.maximumCentralFraction = 0.70 + 0.295 * sensitivity;
+    preset.supportNoiseFraction = 0.85 * (1.0 - sensitivity);
+    preset.minimumSupportingBins = sensitivity < 0.45 ? 2 : (sensitivity < 0.85 ? 1 : 0);
+    preset.minimumIntegratedSignificance = 3.3 - 2.6 * sensitivity;
+    preset.maximumCandidates = static_cast<std::size_t>(
+        std::lround(10.0 + 14.0 * sensitivity));
+    if (options.autoTuneAlignmentSensitivity && spikeRich) {
+        preset.maximumCentralFraction = std::min(preset.maximumCentralFraction, 0.76);
+        preset.minimumSupportingBins = std::max(preset.minimumSupportingBins, 2);
+        preset.maximumCandidates = std::min<std::size_t>(preset.maximumCandidates, 16);
     }
 
     auto patternOptions = options;
     patternOptions.threshold = preset.searchThreshold;
     patternOptions.maxPeaks = std::max(options.maxPeaks, 64);
-    const auto candidates = CalibrationEngine::FindPeakCandidates(histogram, patternOptions);
+    auto searchView = std::unique_ptr<TH1>(dynamic_cast<TH1*>(histogram.Clone()));
+    if (!searchView) return result;
+    searchView->SetDirectory(nullptr);
+    // Square-root compression keeps an intense low-energy X-ray from setting a
+    // global search scale that hides weaker photopeaks elsewhere in the spectrum.
+    for (int bin = 1; bin <= binCount; ++bin) {
+        searchView->SetBinContent(bin,
+            std::sqrt(std::max(histogram.GetBinContent(bin), 0.0)));
+    }
+    const auto candidates = CalibrationEngine::FindPeakCandidates(*searchView, patternOptions);
     std::vector<CandidateQuality> accepted;
     accepted.reserve(candidates.size());
-    const int binCount = histogram.GetNbinsX();
     const int coreRadius = std::max(2, static_cast<int>(std::ceil(1.5 * options.sigmaBins)));
     const int sidebandGap = std::max(2, coreRadius / 2);
     const int sidebandWidth = std::max(4, coreRadius + 1);
@@ -290,19 +344,39 @@ std::vector<double> StrongPatternCandidates(const TH1& histogram,
             continue;
         }
         // Integrated support ranks broad photopeaks ahead of isolated high bins.
-        accepted.push_back({histogram.GetXaxis()->GetBinCenter(center),
-                            significance * (1.0 - 0.5 * centralFraction)});
+        const double charge = histogram.GetXaxis()->GetBinCenter(center);
+        constexpr int regionCount = 10;
+        const double axisFraction = (charge - histogram.GetXaxis()->GetXmin()) /
+            std::max(histogram.GetXaxis()->GetXmax() - histogram.GetXaxis()->GetXmin(), 1e-12);
+        const int region = std::clamp(static_cast<int>(axisFraction * regionCount),
+                                      0, regionCount - 1);
+        accepted.push_back({charge, significance * (1.0 - 0.5 * centralFraction), region});
     }
     std::sort(accepted.begin(), accepted.end(), [](const CandidateQuality& left,
                                                    const CandidateQuality& right) {
         return left.score > right.score;
     });
-    if (accepted.size() > preset.maximumCandidates) accepted.resize(preset.maximumCandidates);
-    std::vector<double> selected;
-    selected.reserve(accepted.size());
-    for (const auto& candidate : accepted) selected.push_back(candidate.charge);
-    std::sort(selected.begin(), selected.end());
-    return selected;
+    const double lowEnergyBoundary = histogram.GetXaxis()->GetXmin() +
+        0.07 * (histogram.GetXaxis()->GetXmax() - histogram.GetXaxis()->GetXmin());
+    const int candidatesAboveLowEnergy = static_cast<int>(std::count_if(
+        accepted.begin(), accepted.end(), [lowEnergyBoundary](const CandidateQuality& candidate) {
+            return candidate.charge >= lowEnergyBoundary;
+        }));
+    const bool suppressLowEnergyCluster = options.autoTuneAlignmentSensitivity &&
+                                          candidatesAboveLowEnergy >= 3;
+    constexpr int regionCount = 10;
+    constexpr std::size_t perRegionLimit = 2;
+    std::array<std::size_t, regionCount> regionUse{};
+    result.charges.reserve(std::min(accepted.size(), preset.maximumCandidates));
+    for (const auto& candidate : accepted) {
+        if (result.charges.size() >= preset.maximumCandidates) break;
+        if (suppressLowEnergyCluster && candidate.charge < lowEnergyBoundary) continue;
+        if (regionUse[candidate.region] >= perRegionLimit) continue;
+        result.charges.push_back(candidate.charge);
+        ++regionUse[candidate.region];
+    }
+    std::sort(result.charges.begin(), result.charges.end());
+    return result;
 }
 
 PeakMatchResult EvaluatePatternTransform(const std::vector<double>& reference,
@@ -342,42 +416,13 @@ PeakMatchResult EvaluatePatternTransform(const std::vector<double>& reference,
     result.score = 100.0 * matchedCount + 25.0 * coverage - normalizedError -
                    2.0 * std::abs(std::log(scale)) -
                    0.25 * std::abs(offset) / referenceSpan -
-                   2.0 * std::abs(quadratic) * referenceSpan / std::max(scale, 1e-9);
+                   30.0 * std::abs(quadratic) * referenceSpan / std::max(scale, 1e-9);
     result.success = matchedCount >= 2;
     return result;
 }
 
-double ScorePatternTransform(const std::vector<double>& reference,
-                             const std::vector<double>& target,
-                             double scale, double offset, double quadratic,
-                             double tolerance) {
-    int matchedCount = 0;
-    double normalizedError = 0.0;
-    double firstMatchedReference = 0.0;
-    double lastMatchedReference = 0.0;
-    for (double referenceCharge : reference) {
-        const double expected = offset + scale * referenceCharge +
-                                quadratic * referenceCharge * referenceCharge;
-        bool found = false;
-        const double matched = NearestCandidate(target, expected, tolerance, found);
-        if (!found) continue;
-        normalizedError += std::abs(matched - expected) / tolerance;
-        if (matchedCount == 0) firstMatchedReference = referenceCharge;
-        lastMatchedReference = referenceCharge;
-        ++matchedCount;
-    }
-    const double referenceSpan = std::max(reference.back() - reference.front(), tolerance);
-    const double coverage = matchedCount > 1
-        ? (lastMatchedReference - firstMatchedReference) / referenceSpan
-        : 0.0;
-    return 100.0 * matchedCount + 25.0 * coverage - normalizedError -
-           2.0 * std::abs(std::log(scale)) -
-           0.25 * std::abs(offset) / referenceSpan -
-           2.0 * std::abs(quadratic) * referenceSpan / std::max(scale, 1e-9);
-}
-
-bool RefinePatternTransform(const PeakMatchResult& match, double& scale, double& offset,
-                            double& quadratic) {
+bool RefinePatternTransform(const PeakMatchResult& match, bool allowQuadratic,
+                            double& scale, double& offset, double& quadratic) {
     int count = 0;
     double referenceMean = 0.0;
     double targetMean = 0.0;
@@ -397,7 +442,7 @@ bool RefinePatternTransform(const PeakMatchResult& match, double& scale, double&
             std::abs(match.referenceCharges[index] - referenceMean));
     }
     if (referenceScale <= 0.0) return false;
-    if (count >= 3) {
+    if (allowQuadratic && count >= 3) {
         double sums[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
         double rhs[3] = {0.0, 0.0, 0.0};
         for (std::size_t index = 0; index < match.matched.size(); ++index) {
@@ -745,12 +790,16 @@ PeakMatchResult CalibrationEngine::MatchReferencePeaks(
 
 PeakMatchResult CalibrationEngine::AlignSpectrumPatterns(
     const TH1& reference, const TH1& target, const SearchOptions& options) {
-    const auto referenceCandidates = StrongPatternCandidates(reference, options);
-    const auto targetCandidates = StrongPatternCandidates(target, options);
+    const auto referencePattern = StrongPatternCandidates(reference, options);
+    const auto targetPattern = StrongPatternCandidates(target, options);
+    const auto& referenceCandidates = referencePattern.charges;
+    const auto& targetCandidates = targetPattern.charges;
     PeakMatchResult best;
     best.referenceCharges = referenceCandidates;
     best.charges.assign(referenceCandidates.size(), 0.0);
     best.matched.assign(referenceCandidates.size(), false);
+    best.referenceSensitivity = referencePattern.sensitivity;
+    best.targetSensitivity = targetPattern.sensitivity;
     if (referenceCandidates.size() < 2 || targetCandidates.size() < 2) return best;
 
     const double referenceRange = reference.GetXaxis()->GetXmax() -
@@ -758,9 +807,24 @@ PeakMatchResult CalibrationEngine::AlignSpectrumPatterns(
     const double targetRange = target.GetXaxis()->GetXmax() - target.GetXaxis()->GetXmin();
     const double tolerance = std::max({
         3.0 * target.GetXaxis()->GetBinWidth(1),
-        std::min(options.matchToleranceFraction, 0.006) * targetRange,
+        std::min(options.matchToleranceFraction, 0.003) * targetRange,
         0.003 * std::max(referenceRange, targetRange)});
+    const double quadraticSeedTolerance = std::max(
+        6.0 * tolerance, 0.035 * std::max(referenceRange, targetRange));
+    const bool considerAffine = options.alignmentModel != AlignmentModel::Quadratic;
+    const bool considerQuadratic = options.alignmentModel != AlignmentModel::Affine;
+    const int minimumQuadraticMatches =
+        options.alignmentModel == AlignmentModel::Quadratic ? 3 : 4;
     double bestScore = -std::numeric_limits<double>::infinity();
+    const auto consider = [&](PeakMatchResult trial, bool quadraticModel,
+                              double& currentBestScore, PeakMatchResult& currentBest) {
+        if (!trial.success || trial.score <= currentBestScore) return;
+        trial.referenceSensitivity = referencePattern.sensitivity;
+        trial.targetSensitivity = targetPattern.sensitivity;
+        trial.quadraticModel = quadraticModel;
+        currentBestScore = trial.score;
+        currentBest = std::move(trial);
+    };
     for (std::size_t referenceLow = 0; referenceLow + 1 < referenceCandidates.size();
          ++referenceLow) {
         for (std::size_t referenceHigh = referenceLow + 1;
@@ -777,12 +841,30 @@ PeakMatchResult CalibrationEngine::AlignSpectrumPatterns(
                     if (scale < 0.25 || scale > 4.0) continue;
                     const double offset = targetCandidates[targetLow] -
                                           scale * referenceCandidates[referenceLow];
-                    const double score = ScorePatternTransform(
-                        referenceCandidates, targetCandidates, scale, offset, 0.0, tolerance);
-                    if (score > bestScore) {
-                        bestScore = score;
-                        best = EvaluatePatternTransform(referenceCandidates, targetCandidates,
-                                                        scale, offset, 0.0, tolerance);
+                    if (considerAffine) {
+                        consider(EvaluatePatternTransform(
+                                     referenceCandidates, targetCandidates,
+                                     scale, offset, 0.0, tolerance),
+                                 false, bestScore, best);
+                    }
+                    if (considerQuadratic) {
+                        auto broad = EvaluatePatternTransform(
+                            referenceCandidates, targetCandidates,
+                            scale, offset, 0.0, quadraticSeedTolerance);
+                        const int broadMatches = static_cast<int>(
+                            std::count(broad.matched.begin(), broad.matched.end(), true));
+                        if (broadMatches < minimumQuadraticMatches) continue;
+                        double quadraticScale = scale;
+                        double quadraticOffset = offset;
+                        double quadratic = 0.0;
+                        if (!RefinePatternTransform(broad, true, quadraticScale,
+                                                    quadraticOffset, quadratic)) {
+                            continue;
+                        }
+                        consider(EvaluatePatternTransform(
+                                     referenceCandidates, targetCandidates, quadraticScale,
+                                     quadraticOffset, quadratic, tolerance),
+                                 true, bestScore, best);
                     }
                 }
             }
@@ -793,11 +875,15 @@ PeakMatchResult CalibrationEngine::AlignSpectrumPatterns(
         double refinedScale = best.scale;
         double refinedOffset = best.offset;
         double refinedQuadratic = best.quadratic;
-        if (!RefinePatternTransform(best, refinedScale, refinedOffset, refinedQuadratic)) break;
+        if (!RefinePatternTransform(best, best.quadraticModel,
+                                    refinedScale, refinedOffset, refinedQuadratic)) break;
         auto refined = EvaluatePatternTransform(referenceCandidates, targetCandidates,
                                                 refinedScale, refinedOffset,
                                                 refinedQuadratic, tolerance);
         if (!refined.success) break;
+        refined.referenceSensitivity = referencePattern.sensitivity;
+        refined.targetSensitivity = targetPattern.sensitivity;
+        refined.quadraticModel = best.quadraticModel;
         best = std::move(refined);
     }
     const int matchedCount = static_cast<int>(

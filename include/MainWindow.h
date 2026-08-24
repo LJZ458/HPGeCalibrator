@@ -14,6 +14,7 @@
 #include <vector>
 
 class QComboBox;
+class QCheckBox;
 class QDoubleSpinBox;
 class QGroupBox;
 class QLabel;
@@ -67,7 +68,8 @@ private:
     std::vector<int> SelectedDescriptorIndices() const;
     std::vector<int> SelectedCrystals() const;
     AxisOrientation Orientation() const;
-    CalibrationEngine::AlignmentSensitivity AlignmentSensitivity() const;
+    double AlignmentSensitivity() const;
+    CalibrationEngine::AlignmentModel AlignmentModel() const;
     int ReferenceCrystal() const;
     int CurrentResultCrystal() const;
     const HistogramDescriptor* DescriptorForCombo(const QComboBox* combo) const;
@@ -126,7 +128,9 @@ private:
     QDoubleSpinBox* sigmaEntry_ = nullptr;
     QDoubleSpinBox* thresholdEntry_ = nullptr;
     QDoubleSpinBox* residualLimitEntry_ = nullptr;
-    QComboBox* alignmentSensitivityCombo_ = nullptr;
+    QDoubleSpinBox* alignmentSensitivityEntry_ = nullptr;
+    QCheckBox* autoTuneAlignmentEntry_ = nullptr;
+    QComboBox* alignmentModelCombo_ = nullptr;
     QComboBox* alignmentHistogramCombo_ = nullptr;
     QSpinBox* alignmentCrystalEntry_ = nullptr;
     QListWidget* resultList_ = nullptr;

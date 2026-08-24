@@ -64,6 +64,8 @@ if(BUILD_TESTING)
             two-peak-pattern-alignment
             co56-crystal-pattern-alignment
             low-statistics-spike-alignment
+            adaptive-spectrum-sensitivity
+            quadratic-xray-alignment
             pattern-alignment-validation
             fit-quadratic
             fit-validation)

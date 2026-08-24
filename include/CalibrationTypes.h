@@ -53,6 +53,9 @@ struct PeakMatchResult {
     double offset = 0.0;
     double quadratic = 0.0;
     double score = 0.0;
+    double referenceSensitivity = 0.0;
+    double targetSensitivity = 0.0;
+    bool quadraticModel = false;
 };
 
 struct CalibrationResult {

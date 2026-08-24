@@ -10,10 +10,10 @@ namespace hpge {
 
 class CalibrationEngine {
 public:
-    enum class AlignmentSensitivity {
-        Conservative,
-        Balanced,
-        High
+    enum class AlignmentModel {
+        Auto,
+        Affine,
+        Quadratic
     };
 
     struct SearchOptions {
@@ -21,7 +21,9 @@ public:
         double threshold = 0.05;
         int maxPeaks = 80;
         double matchToleranceFraction = 0.018;
-        AlignmentSensitivity alignmentSensitivity = AlignmentSensitivity::Balanced;
+        double alignmentSensitivity = 0.35;
+        bool autoTuneAlignmentSensitivity = true;
+        AlignmentModel alignmentModel = AlignmentModel::Auto;
     };
 
     static std::vector<double> FindPeakCandidates(const TH1& histogram,

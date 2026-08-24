@@ -4,6 +4,7 @@
 #include "SpectrumPlotWidget.h"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
@@ -350,23 +351,28 @@ QWidget* MainWindow::BuildCalibrationTab() {
 
     auto* alignment = new QGroupBox("Pre-calibration spectrum alignment");
     auto* alignmentLayout = new QVBoxLayout(alignment);
-    alignmentLayout->addWidget(Hint("Rough diagnostic overlay after intensity-independent peak-pattern mapping; calibration still refits every mapped peak. Conservative sensitivity is recommended for low-count spectra with background spikes."));
-    alignmentSensitivityCombo_ = new QComboBox;
-    alignmentSensitivityCombo_->addItem("Conservative — reject spikes");
-    alignmentSensitivityCombo_->addItem("Balanced");
-    alignmentSensitivityCombo_->addItem("High — retain weak/narrow peaks");
-    alignmentSensitivityCombo_->setCurrentIndex(0);
-    alignmentSensitivityCombo_->setToolTip(
-        "Controls only the peaks used to align spectrum patterns. Conservative requires "
-        "multi-bin peak support and selects fewer reference candidates.");
+    alignmentLayout->addWidget(Hint("Alignment searches each projected crystal independently. Auto-tuning adjusts the requested sensitivity for that spectrum's count level and spike content; intense low-energy X-rays are compressed during peak discovery so they cannot hide weaker gamma lines."));
+    alignmentSensitivityEntry_ = RealEntry(35.0, 0, 0.0, 100.0);
+    alignmentSensitivityEntry_->setSuffix(" %");
+    alignmentSensitivityEntry_->setToolTip(
+        "Continuous starting sensitivity: lower values reject more narrow/noisy candidates; "
+        "higher values retain weaker peaks.");
+    autoTuneAlignmentEntry_ = new QCheckBox("Auto-tune for each crystal spectrum");
+    autoTuneAlignmentEntry_->setChecked(true);
+    alignmentModelCombo_ = new QComboBox;
+    alignmentModelCombo_->addItem("Auto — affine or quadratic");
+    alignmentModelCombo_->addItem("Affine only");
+    alignmentModelCombo_->addItem("Quadratic");
     alignmentHistogramCombo_ = new QComboBox;
     alignmentCrystalEntry_ = new QSpinBox;
     alignmentCrystalEntry_->setRange(0, 63);
     alignmentCrystalEntry_->setValue(1);
     auto* align = new QPushButton("Show aligned spectra");
     connect(align, &QPushButton::clicked, this, [this] { ShowSpectrumAlignment(); });
-    alignmentLayout->addWidget(Row({new QLabel("Reference-peak sensitivity"),
-                                    alignmentSensitivityCombo_}));
+    alignmentLayout->addWidget(Row({new QLabel("Peak sensitivity"),
+                                    alignmentSensitivityEntry_}));
+    alignmentLayout->addWidget(autoTuneAlignmentEntry_);
+    alignmentLayout->addWidget(Row({new QLabel("Charge mapping"), alignmentModelCombo_}));
     alignmentLayout->addWidget(alignmentHistogramCombo_);
     alignmentLayout->addWidget(Row({new QLabel("Target crystal"), alignmentCrystalEntry_}));
     alignmentLayout->addWidget(align);
@@ -592,14 +598,18 @@ AxisOrientation MainWindow::Orientation() const {
     return orientationCombo_->currentIndex() == 1 ? AxisOrientation::ChargeOnY : AxisOrientation::ChargeOnX;
 }
 
-CalibrationEngine::AlignmentSensitivity MainWindow::AlignmentSensitivity() const {
-    if (alignmentSensitivityCombo_->currentIndex() == 0) {
-        return CalibrationEngine::AlignmentSensitivity::Conservative;
+double MainWindow::AlignmentSensitivity() const {
+    return alignmentSensitivityEntry_->value() / 100.0;
+}
+
+CalibrationEngine::AlignmentModel MainWindow::AlignmentModel() const {
+    if (alignmentModelCombo_->currentIndex() == 1) {
+        return CalibrationEngine::AlignmentModel::Affine;
     }
-    if (alignmentSensitivityCombo_->currentIndex() == 2) {
-        return CalibrationEngine::AlignmentSensitivity::High;
+    if (alignmentModelCombo_->currentIndex() == 2) {
+        return CalibrationEngine::AlignmentModel::Quadratic;
     }
-    return CalibrationEngine::AlignmentSensitivity::Balanced;
+    return CalibrationEngine::AlignmentModel::Auto;
 }
 
 int MainWindow::ReferenceCrystal() const { return referenceCrystalEntry_->value(); }
@@ -850,6 +860,8 @@ std::vector<CalibrationPoint> MainWindow::BuildPointsForCrystal(int crystal) {
     options.sigmaBins = sigmaEntry_->value();
     options.threshold = thresholdEntry_->value();
     options.alignmentSensitivity = AlignmentSensitivity();
+    options.autoTuneAlignmentSensitivity = autoTuneAlignmentEntry_->isChecked();
+    options.alignmentModel = AlignmentModel();
     for (int descriptorIndex : SelectedDescriptorIndices()) {
         const auto& descriptor = descriptors_[descriptorIndex];
         std::vector<ReferencePeak> references;
@@ -1081,6 +1093,8 @@ void MainWindow::ShowSpectrumAlignment() {
     options.sigmaBins = sigmaEntry_->value();
     options.threshold = thresholdEntry_->value();
     options.alignmentSensitivity = AlignmentSensitivity();
+    options.autoTuneAlignmentSensitivity = autoTuneAlignmentEntry_->isChecked();
+    options.alignmentModel = AlignmentModel();
     const auto match = CalibrationEngine::AlignSpectrumPatterns(*reference, *target, options);
     if (!match.success || !(match.scale > 0.0) || !std::isfinite(match.scale) || !std::isfinite(match.offset)) {
         SetStatus("Could not align this spectrum: not enough corresponding peaks were found.");
@@ -1113,7 +1127,11 @@ void MainWindow::ShowSpectrumAlignment() {
                           {std::move(referenceSeries), std::move(targetSeries)}, std::move(markers));
     const int matched = static_cast<int>(std::count(match.matched.begin(), match.matched.end(), true));
     SetStatus("Alignment preview: " + std::to_string(matched) + "/" +
-              std::to_string(match.referenceCharges.size()) + " pattern peaks; target charge = " +
+              std::to_string(match.referenceCharges.size()) + " pattern peaks; " +
+              (match.quadraticModel ? "quadratic" : "affine") +
+              " mapping; tuned sensitivity R/T " +
+              FormatNumber(100.0 * match.referenceSensitivity, 0) + "%/" +
+              FormatNumber(100.0 * match.targetSensitivity, 0) + "%; target charge = " +
               FormatNumber(match.offset, 3) + " + " + FormatNumber(match.scale, 6) + " q + " +
               FormatNumber(match.quadratic, 9) + " q^2. No energy calibration applied.");
 }
