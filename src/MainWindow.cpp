@@ -23,6 +23,7 @@
 #include <TPad.h>
 #include <TRootEmbeddedCanvas.h>
 #include <TSystem.h>
+#include <TTimer.h>
 
 #include <algorithm>
 #include <cmath>
@@ -41,11 +42,38 @@ public:
 
 protected:
     Bool_t HandleContainerButton(Event_t* event) override {
-        const Bool_t handled = TRootEmbeddedCanvas::HandleContainerButton(event);
-        if (event && event->fType == kButtonPress && event->fCode == kButton1 && owner_) {
-            owner_->OnCanvasEvent(kButton1Down, event->fX, event->fY, nullptr);
+        if (event && owner_) {
+            if (event->fCode == kButton1 && owner_->CanvasPeakPickingEnabled()) {
+                if (event->fType == kButtonPress) {
+                    owner_->OnCanvasEvent(kButton1Down, event->fX, event->fY, nullptr);
+                }
+                // Do not let ROOT select a primitive which the peak handler may redraw.
+                return kTRUE;
+            }
+            if (event->fCode == kButton2 || event->fCode == kButton3) {
+                // The calibrator does not use ROOT's object editor/context menu. Suppressing
+                // these actions also prevents an editor panel from retaining stale objects.
+                return kTRUE;
+            }
         }
-        return handled;
+        return TRootEmbeddedCanvas::HandleContainerButton(event);
+    }
+
+    Bool_t HandleContainerDoubleClick(Event_t*) override { return kTRUE; }
+
+private:
+    MainWindow* owner_ = nullptr;
+};
+
+class PeakClickTimer final : public TTimer {
+public:
+    explicit PeakClickTimer(MainWindow* owner) : TTimer(10, kTRUE), owner_(owner) {
+        TurnOff();
+    }
+
+    Bool_t Notify() override {
+        if (owner_) owner_->ProcessPendingCanvasClick();
+        return kFALSE;
     }
 
 private:
@@ -77,6 +105,21 @@ std::string FormatNumber(double value, int precision = 5) {
     return out.str();
 }
 
+void BeginSafeCanvasUpdate(TCanvas& canvas) {
+    canvas.SetEditable(kTRUE);
+    canvas.SetSelected(nullptr);
+    canvas.SetSelectedPad(nullptr);
+    canvas.Clear();
+}
+
+void FinishSafeCanvasUpdate(TCanvas& canvas) {
+    canvas.Modified();
+    canvas.Update();
+    canvas.SetSelected(nullptr);
+    canvas.SetSelectedPad(nullptr);
+    canvas.SetEditable(kFALSE);
+}
+
 } // namespace
 
 MainWindow::MainWindow(const TGWindow* parent, UInt_t width, UInt_t height)
@@ -84,6 +127,7 @@ MainWindow::MainWindow(const TGWindow* parent, UInt_t width, UInt_t height)
     SetCleanup(kDeepCleanup);
     SetWindowName("HPGe Crystal Calibrator");
     BuildInterface();
+    peakClickTimer_ = new PeakClickTimer(this);
     PopulateEnergyLines();
     MapSubwindows();
     Resize(GetDefaultSize());
@@ -92,7 +136,12 @@ MainWindow::MainWindow(const TGWindow* parent, UInt_t width, UInt_t height)
 }
 
 MainWindow::~MainWindow() {
-    if (canvas_ && canvas_->GetCanvas()) canvas_->GetCanvas()->Clear();
+    if (peakClickTimer_) {
+        peakClickTimer_->Stop();
+        delete peakClickTimer_;
+        peakClickTimer_ = nullptr;
+    }
+    if (canvas_ && canvas_->GetCanvas()) BeginSafeCanvasUpdate(*canvas_->GetCanvas());
     displayedSpectrum_.reset();
 }
 
@@ -243,6 +292,24 @@ void MainWindow::BuildCalibrationTab(TGCompositeFrame* parent) {
     layout->AddFrame(CommandButton(layout, "Calibrate selected crystals", kRunCalibration, this),
                      ExpandX(3, 3, 5, 5));
 
+    auto* alignment = new TGGroupFrame(layout, "Pre-calibration spectrum alignment");
+    alignment->AddFrame(new TGLabel(alignment,
+        "Overlay a crystal after affine peak mapping to the reference spectrum."), Left());
+    alignmentHistogramCombo_ = new TGComboBox(alignment, kAlignmentHistogram);
+    alignmentHistogramCombo_->Associate(this);
+    alignment->AddFrame(alignmentHistogramCombo_, ExpandX());
+    auto* alignmentCrystalRow = new TGHorizontalFrame(alignment);
+    alignmentCrystalRow->AddFrame(new TGLabel(alignmentCrystalRow, "Target crystal (0-63):"), Left());
+    alignmentCrystalEntry_ = new TGNumberEntry(alignmentCrystalRow, 1, 4, -1,
+                                               TGNumberFormat::kNESInteger,
+                                               TGNumberFormat::kNEANonNegative,
+                                               TGNumberFormat::kNELLimitMinMax, 0, 63);
+    alignmentCrystalRow->AddFrame(alignmentCrystalEntry_, Left());
+    alignment->AddFrame(alignmentCrystalRow, ExpandX());
+    alignment->AddFrame(CommandButton(alignment, "Show aligned spectra", kShowAlignment, this),
+                        ExpandX());
+    layout->AddFrame(alignment, ExpandX());
+
     layout->AddFrame(new TGLabel(layout,
         "Results: [OK/REVIEW/FAIL] crystal | peaks | RMS | p0, p1, p2"), Left());
     resultList_ = new TGListBox(layout, kResultList);
@@ -344,6 +411,7 @@ Bool_t MainWindow::ProcessMessage(Longptr_t msg, Longptr_t parm1, Longptr_t parm
             RedrawDisplayedSpectrum();
             break;
         case kRunCalibration: RunCalibration(); break;
+        case kShowAlignment: ShowSpectrumAlignment(); break;
         case kShowSpectrum: {
             const int crystal = CurrentResultCrystal();
             const auto* descriptor = DescriptorForCombo(manualHistogramCombo_);
@@ -429,6 +497,7 @@ void MainWindow::RefreshDatasetWidgets() {
     histogramList_->RemoveAll();
     referenceHistogramCombo_->RemoveEntries(0, 999999);
     manualHistogramCombo_->RemoveEntries(0, 999999);
+    alignmentHistogramCombo_->RemoveEntries(0, 999999);
     for (std::size_t i = 0; i < descriptors_.size(); ++i) {
         const auto& descriptor = descriptors_[i];
         const int id = static_cast<int>(i) + 1;
@@ -438,14 +507,17 @@ void MainWindow::RefreshDatasetWidgets() {
         histogramList_->AddEntry(item.c_str(), id);
         referenceHistogramCombo_->AddEntry(descriptor.displayName.c_str(), id);
         manualHistogramCombo_->AddEntry(descriptor.displayName.c_str(), id);
+        alignmentHistogramCombo_->AddEntry(descriptor.displayName.c_str(), id);
     }
     if (!descriptors_.empty()) {
         referenceHistogramCombo_->Select(1, kFALSE);
         manualHistogramCombo_->Select(1, kFALSE);
+        alignmentHistogramCombo_->Select(1, kFALSE);
     }
     histogramList_->Layout();
     referenceHistogramCombo_->Layout();
     manualHistogramCombo_->Layout();
+    alignmentHistogramCombo_->Layout();
     updatingWidgets_ = false;
 }
 
@@ -520,9 +592,7 @@ void MainWindow::ShowCrystalSpectrum(int crystal, const HistogramDescriptor& des
     }
     auto* rootCanvas = canvas_->GetCanvas();
     if (displayedSpectrum_) displayedSpectrum_->ResetBit(kCanDelete);
-    rootCanvas->Clear();
-    rootCanvas->Modified();
-    rootCanvas->Update();
+    BeginSafeCanvasUpdate(*rootCanvas);
     displayedSpectrum_.reset();
     pendingRangeStart_.reset();
     displayedSpectrum_ = std::move(spectrum);
@@ -537,14 +607,14 @@ void MainWindow::ShowCrystalSpectrum(int crystal, const HistogramDescriptor& des
 void MainWindow::RedrawDisplayedSpectrum() {
     if (!displayedSpectrum_) return;
     auto* rootCanvas = canvas_->GetCanvas();
-    rootCanvas->Clear();
+    BeginSafeCanvasUpdate(*rootCanvas);
     rootCanvas->cd();
     displayedSpectrum_->ResetBit(kCanDelete);
+    displayedSpectrum_->SetBit(kNoContextMenu);
     displayedSpectrum_->SetLineColor(kBlue + 1);
     displayedSpectrum_->Draw("hist");
     DrawSpectrumOverlays();
-    rootCanvas->Modified();
-    rootCanvas->Update();
+    FinishSafeCanvasUpdate(*rootCanvas);
 }
 
 void MainWindow::DrawPeakFitOverlay(const PeakFitResult& fit, int color, int lineStyle,
@@ -552,6 +622,7 @@ void MainWindow::DrawPeakFitOverlay(const PeakFitResult& fit, int color, int lin
     if (!displayedSpectrum_ || !fit.success) return;
     const double maximum = std::max(displayedSpectrum_->GetMaximum(), 1.0);
     TBox range(fit.rangeLow, 0.0, fit.rangeHigh, maximum);
+    range.SetBit(kNoContextMenu);
     range.SetFillColorAlpha(color, 0.08);
     range.SetLineColor(color);
     range.SetLineStyle(3);
@@ -565,18 +636,21 @@ void MainWindow::DrawPeakFitOverlay(const PeakFitResult& fit, int color, int lin
         fitY[index] = CalibrationEngine::EvaluateRadwarePeak(fitX[index], fit);
     }
     TGraph curve(static_cast<int>(fitX.size()), fitX.data(), fitY.data());
+    curve.SetBit(kNoContextMenu);
     curve.SetLineColor(color);
     curve.SetLineStyle(lineStyle);
     curve.SetLineWidth(2);
     curve.DrawClone("L same");
 
     TLine centroid(fit.centroid, 0.0, fit.centroid, maximum);
+    centroid.SetBit(kNoContextMenu);
     centroid.SetLineColor(color);
     centroid.SetLineStyle(lineStyle);
     centroid.SetLineWidth(2);
     centroid.DrawClone("same");
     if (!label.empty()) {
         TLatex text;
+        text.SetBit(kNoContextMenu);
         text.SetTextColor(color);
         text.SetTextSize(0.026);
         text.SetTextAngle(90.0);
@@ -621,6 +695,7 @@ void MainWindow::DrawSpectrumOverlays() {
     if (pendingRangeStart_) {
         const double maximum = std::max(displayedSpectrum_->GetMaximum(), 1.0);
         TLine pending(*pendingRangeStart_, 0.0, *pendingRangeStart_, maximum);
+        pending.SetBit(kNoContextMenu);
         pending.SetLineColor(kOrange + 7);
         pending.SetLineStyle(3);
         pending.SetLineWidth(2);
@@ -635,11 +710,25 @@ double MainWindow::ClickCharge(Int_t px) const {
 }
 
 void MainWindow::OnCanvasEvent(Int_t event, Int_t px, Int_t, TObject*) {
-    if (event != kButton1Down || !displayedSpectrum_) return;
-    const double clicked = ClickCharge(px);
+    if (event != kButton1Down || !CanvasPeakPickingEnabled() || !peakClickTimer_) return;
+    pendingClickPixelX_ = px;
+    pendingCanvasClick_ = true;
+    peakClickTimer_->Start(10, kTRUE);
+}
+
+void MainWindow::ProcessPendingCanvasClick() {
+    if (!pendingCanvasClick_) return;
+    pendingCanvasClick_ = false;
+    if (!CanvasPeakPickingEnabled()) return;
+    const double clicked = ClickCharge(pendingClickPixelX_);
     if (clicked < displayedSpectrum_->GetXaxis()->GetXmin() ||
         clicked > displayedSpectrum_->GetXaxis()->GetXmax()) return;
     if (tabs_->GetCurrent() == 1 || tabs_->GetCurrent() == 2) HandleRangeClick(clicked);
+}
+
+bool MainWindow::CanvasPeakPickingEnabled() const {
+    return displayedSpectrum_ && tabs_ &&
+           (tabs_->GetCurrent() == 1 || tabs_->GetCurrent() == 2);
 }
 
 void MainWindow::HandleRangeClick(double charge) {
@@ -844,6 +933,125 @@ void MainWindow::RunCalibration() {
               std::to_string(review) + " review, " + std::to_string(failed) + " failed.");
 }
 
+void MainWindow::ShowSpectrumAlignment() {
+    const auto* descriptor = DescriptorForCombo(alignmentHistogramCombo_);
+    if (!descriptor) {
+        SetStatus("Choose a source histogram for the alignment preview.");
+        return;
+    }
+    std::vector<ReferencePeak> references;
+    for (const auto& peak : referencePeaks_) {
+        if (peak.datasetId == descriptor->id) references.push_back(peak);
+    }
+    if (references.empty()) {
+        SetStatus("Select at least one reference peak on this histogram before alignment.");
+        return;
+    }
+    std::sort(references.begin(), references.end(),
+              [](const ReferencePeak& left, const ReferencePeak& right) {
+                  return left.charge < right.charge;
+              });
+
+    const int referenceCrystal = ReferenceCrystal();
+    const int targetCrystal = std::clamp(
+        static_cast<int>(alignmentCrystalEntry_->GetIntNumber()), 0, 63);
+    std::string error;
+    auto referenceSpectrum = repository_.ProjectCrystal(
+        *descriptor, referenceCrystal, Orientation(), error);
+    if (!referenceSpectrum) {
+        SetStatus(error);
+        return;
+    }
+    auto targetSpectrum = repository_.ProjectCrystal(
+        *descriptor, targetCrystal, Orientation(), error);
+    if (!targetSpectrum) {
+        SetStatus(error);
+        return;
+    }
+
+    std::vector<double> referenceCharges;
+    referenceCharges.reserve(references.size());
+    for (const auto& peak : references) referenceCharges.push_back(peak.peakFit.centroid);
+    CalibrationEngine::SearchOptions options;
+    options.sigmaBins = sigmaEntry_->GetNumber();
+    options.threshold = thresholdEntry_->GetNumber();
+    const auto match = CalibrationEngine::MatchReferencePeaks(
+        *targetSpectrum, referenceCharges, options);
+    if (!match.success || !(match.scale > 0.0) || !std::isfinite(match.scale) ||
+        !std::isfinite(match.offset)) {
+        SetStatus("Could not align this spectrum: not enough corresponding peaks were found.");
+        return;
+    }
+
+    const double referenceMaximum = std::max(referenceSpectrum->GetMaximum(), 1.0);
+    const double targetMaximum = std::max(targetSpectrum->GetMaximum(), 1.0);
+    std::vector<double> referenceX(referenceSpectrum->GetNbinsX());
+    std::vector<double> referenceY(referenceSpectrum->GetNbinsX());
+    for (int bin = 1; bin <= referenceSpectrum->GetNbinsX(); ++bin) {
+        const std::size_t index = static_cast<std::size_t>(bin - 1);
+        referenceX[index] = referenceSpectrum->GetXaxis()->GetBinCenter(bin);
+        referenceY[index] = referenceSpectrum->GetBinContent(bin) / referenceMaximum;
+    }
+    std::vector<double> alignedX(targetSpectrum->GetNbinsX());
+    std::vector<double> alignedY(targetSpectrum->GetNbinsX());
+    for (int bin = 1; bin <= targetSpectrum->GetNbinsX(); ++bin) {
+        const std::size_t index = static_cast<std::size_t>(bin - 1);
+        const double targetCharge = targetSpectrum->GetXaxis()->GetBinCenter(bin);
+        alignedX[index] = (targetCharge - match.offset) / match.scale;
+        alignedY[index] = targetSpectrum->GetBinContent(bin) / targetMaximum;
+    }
+
+    auto* rootCanvas = canvas_->GetCanvas();
+    if (displayedSpectrum_) displayedSpectrum_->ResetBit(kCanDelete);
+    BeginSafeCanvasUpdate(*rootCanvas);
+    displayedSpectrum_.reset();
+    displayedDatasetId_.clear();
+    displayedCrystal_ = -1;
+    pendingRangeStart_.reset();
+    rootCanvas->cd();
+
+    TGraph referenceGraph(static_cast<int>(referenceX.size()), referenceX.data(), referenceY.data());
+    referenceGraph.SetBit(kNoContextMenu);
+    referenceGraph.SetTitle(("Pre-calibration alignment: C" + std::to_string(targetCrystal) +
+                             " to reference C" + std::to_string(referenceCrystal) +
+                             ";Reference-spectrum charge;Normalized counts").c_str());
+    referenceGraph.SetLineColor(kBlue + 1);
+    referenceGraph.SetLineWidth(2);
+    referenceGraph.SetMinimum(0.0);
+    referenceGraph.SetMaximum(1.10);
+    referenceGraph.GetXaxis()->SetLimits(referenceSpectrum->GetXaxis()->GetXmin(),
+                                         referenceSpectrum->GetXaxis()->GetXmax());
+    auto* drawnReference = dynamic_cast<TGraph*>(referenceGraph.DrawClone("AL"));
+
+    TGraph targetGraph(static_cast<int>(alignedX.size()), alignedX.data(), alignedY.data());
+    targetGraph.SetBit(kNoContextMenu);
+    targetGraph.SetLineColor(kRed + 1);
+    targetGraph.SetLineWidth(2);
+    auto* drawnTarget = dynamic_cast<TGraph*>(targetGraph.DrawClone("L same"));
+
+    for (const auto& reference : references) {
+        TLine marker(reference.peakFit.centroid, 0.0, reference.peakFit.centroid, 1.05);
+        marker.SetBit(kNoContextMenu);
+        marker.SetLineColor(kGreen + 2);
+        marker.SetLineStyle(3);
+        marker.DrawClone("same");
+    }
+    TLegend legend(0.55, 0.78, 0.89, 0.91);
+    legend.SetBit(kNoContextMenu);
+    legend.SetBorderSize(0);
+    legend.AddEntry(drawnReference, ("Reference C" + std::to_string(referenceCrystal)).c_str(), "l");
+    legend.AddEntry(drawnTarget, ("Aligned C" + std::to_string(targetCrystal)).c_str(), "l");
+    legend.DrawClone("same");
+    FinishSafeCanvasUpdate(*rootCanvas);
+
+    const int matchedCount = static_cast<int>(
+        std::count(match.matched.begin(), match.matched.end(), true));
+    SetStatus("Alignment preview: " + std::to_string(matchedCount) + "/" +
+              std::to_string(referenceCharges.size()) + " peaks, target charge = " +
+              FormatNumber(match.offset, 3) + " + " + FormatNumber(match.scale, 6) +
+              " x reference charge. No energy calibration has been applied.");
+}
+
 void MainWindow::RefitSelectedCrystal() {
     const int crystal = CurrentResultCrystal();
     if (crystal < 0) {
@@ -892,7 +1100,7 @@ void MainWindow::ShowSelectedCalibration() {
     }
     auto* rootCanvas = canvas_->GetCanvas();
     if (displayedSpectrum_) displayedSpectrum_->ResetBit(kCanDelete);
-    rootCanvas->Clear();
+    BeginSafeCanvasUpdate(*rootCanvas);
     displayedSpectrum_.reset();
     displayedDatasetId_.clear();
     displayedCrystal_ = -1;
@@ -929,7 +1137,7 @@ void MainWindow::ShowSelectedCalibration() {
     zero.SetLineStyle(2);
     zero.DrawClone();
     rootCanvas->cd(0);
-    rootCanvas->Update();
+    FinishSafeCanvasUpdate(*rootCanvas);
     SetStatus("Crystal " + std::to_string(crystal) + ": " + result.status);
 }
 

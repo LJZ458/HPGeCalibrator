@@ -19,6 +19,7 @@ The application runs on macOS and Linux anywhere CERN ROOT with GUI support is a
 - Fits each selected interval with a RadWare/GF3-style Gaussian, low-energy tail, smoothed step, and quadratic background model; calibration uses the fitted centroid and uncertainty.
 - Draws selected ranges, fitted peak curves, centroids, and energy labels directly over each crystal spectrum.
 - Finds corresponding peaks in the other crystals with `TSpectrum` and an affine peak-pattern mapping, without requiring predefined charge windows.
+- Previews that affine mapping before calibration by overlaying the normalized reference spectrum and target spectrum in a common reference-charge coordinate.
 - Combines peak points from multiple source histograms into one quadratic fit per crystal.
 - Displays calibration curves and per-line residuals, and flags high-RMS or exactly determined fits for review.
 - Lets the user replace any automatically matched point by selecting a new range in a problematic crystal and refitting it.
@@ -40,11 +41,11 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-The test suite reports fifteen focused checks separately: peak discovery and refinement,
+The test suite reports sixteen focused checks separately: peak discovery and refinement,
 single- and multi-peak mapping, RadWare peak fitting and validation, mapped interval fitting,
-quadratic fitting and validation, recursive histogram discovery/cache loading, both TH2 axis
-orientations, repeated multi-file projection/cache cycling, repository error handling, and sample
-ROOT-file generation.
+pre-calibration spectrum alignment, quadratic fitting and validation, recursive histogram
+discovery/cache loading, both TH2 axis orientations, repeated multi-file projection/cache cycling,
+repository error handling, and sample ROOT-file generation.
 
 Run the application:
 
@@ -75,9 +76,10 @@ instead of entering ROOT with a null graphics backend.
 
 1. In **Data**, add each ROOT file. Select one or more discovered `TH2` histograms, choose the axis orientation, reference crystal, and crystals to calibrate.
 2. In **Reference peaks**, choose the first source histogram and show its reference spectrum. Select a known energy (or add a custom one), click the lower fit limit, then click the upper fit limit. The selected band, RadWare fit curve, fitted centroid, and energy label remain visible. Repeat for all usable lines and all source histograms.
-3. In **Calibration & review**, adjust peak-search parameters if necessary and calibrate the selected crystals. At least three total reference points are required for a quadratic fit; four or more provide a meaningful residual-based quality check.
-4. Select any `REVIEW` or `FAIL` result. Choose its source histogram and energy, show the spectrum, click the lower and upper limits around the correct peak, and press **Refit crystal**. A manual centroid replaces the automatic point for that dataset and energy. After refitting, the spectrum stays visible with the fitted peak overlays.
-5. Inspect **Fit + residuals**, then export the complete result table to CSV.
+3. In **Calibration & review**, choose a histogram and target crystal under **Pre-calibration spectrum alignment**, then click **Show aligned spectra**. The blue reference and red target spectra are normalized and overlaid after the affine peak mapping; the status bar reports its scale, offset, and matched-peak count. This is only a charge-axis alignment preview—no energy calibration has been applied.
+4. Adjust peak-search parameters if necessary and calibrate the selected crystals. At least three total reference points are required for a quadratic fit; four or more provide a meaningful residual-based quality check.
+5. Select any `REVIEW` or `FAIL` result. Choose its source histogram and energy, show the spectrum, click the lower and upper limits around the correct peak, and press **Refit crystal**. A manual centroid replaces the automatic point for that dataset and energy. After refitting, the spectrum stays visible with the fitted peak overlays.
+6. Inspect **Fit + residuals**, then export the complete result table to CSV.
 
 ## Histogram convention
 

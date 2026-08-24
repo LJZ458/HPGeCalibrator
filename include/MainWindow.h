@@ -19,6 +19,7 @@ class TGNumberEntry;
 class TGTab;
 class TRootEmbeddedCanvas;
 class TH1D;
+class TTimer;
 
 namespace hpge {
 
@@ -30,6 +31,8 @@ public:
     Bool_t ProcessMessage(Longptr_t msg, Longptr_t parm1, Longptr_t parm2) override;
     void CloseWindow() override;
     void OnCanvasEvent(Int_t event, Int_t px, Int_t py, TObject* selected);
+    void ProcessPendingCanvasClick();
+    bool CanvasPeakPickingEnabled() const;
 
 private:
     enum WidgetId {
@@ -45,6 +48,8 @@ private:
         kClearReferencePeaks,
         kAddCustomEnergy,
         kRunCalibration,
+        kShowAlignment,
+        kAlignmentHistogram,
         kResultList,
         kShowSpectrum,
         kShowCalibration,
@@ -97,6 +102,7 @@ private:
     std::vector<CalibrationPoint> BuildPointsForCrystal(int crystal);
     CalibrationResult CalibrateCrystal(int crystal);
     void RunCalibration();
+    void ShowSpectrumAlignment();
     void RefitSelectedCrystal();
     void RefreshResults();
     void ShowSelectedCalibration();
@@ -115,7 +121,10 @@ private:
     std::string displayedDatasetId_;
     int displayedCrystal_ = -1;
     std::optional<double> pendingRangeStart_;
+    int pendingClickPixelX_ = 0;
+    bool pendingCanvasClick_ = false;
     bool updatingWidgets_ = false;
+    TTimer* peakClickTimer_ = nullptr;
 
     TGTab* tabs_ = nullptr;
     TGListBox* histogramList_ = nullptr;
@@ -129,6 +138,8 @@ private:
     TGNumberEntry* sigmaEntry_ = nullptr;
     TGNumberEntry* thresholdEntry_ = nullptr;
     TGNumberEntry* residualLimitEntry_ = nullptr;
+    TGComboBox* alignmentHistogramCombo_ = nullptr;
+    TGNumberEntry* alignmentCrystalEntry_ = nullptr;
     TGListBox* resultList_ = nullptr;
     TGComboBox* manualHistogramCombo_ = nullptr;
     TGListBox* manualEnergyList_ = nullptr;

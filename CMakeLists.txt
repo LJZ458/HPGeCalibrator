@@ -41,6 +41,7 @@ if(BUILD_TESTING)
             radware-peak-fit
             radware-fit-validation
             mapped-radware-fit
+            spectrum-alignment
             fit-quadratic
             fit-validation)
         add_test(NAME calibration-${test_case}

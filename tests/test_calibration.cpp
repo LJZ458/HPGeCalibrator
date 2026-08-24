@@ -184,6 +184,32 @@ bool TestMappedRadwareFit() {
     return true;
 }
 
+bool TestSpectrumAlignment() {
+    const std::vector<double> reference{500.0, 1100.0, 1900.0, 2850.0};
+    const double expectedScale = 1.13;
+    const double expectedOffset = -28.0;
+    auto target = MakeSpectrum("alignment_preview", reference,
+                               expectedScale, expectedOffset);
+    hpge::CalibrationEngine::SearchOptions options;
+    const auto match = hpge::CalibrationEngine::MatchReferencePeaks(target, reference, options);
+    if (!match.success || !(match.scale > 0.0)) {
+        std::cerr << "Pre-calibration spectrum alignment failed\n";
+        return false;
+    }
+    bool aligned = true;
+    for (std::size_t index = 0; index < reference.size(); ++index) {
+        if (!match.matched[index]) {
+            std::cerr << "Alignment preview missed peak " << index << '\n';
+            aligned = false;
+            continue;
+        }
+        const double commonCharge = (match.charges[index] - match.offset) / match.scale;
+        aligned &= Near(commonCharge, reference[index], 2.0,
+                        "aligned preview peak " + std::to_string(index));
+    }
+    return aligned;
+}
+
 bool TestFitQuadratic() {
     const double p0 = -2.3;
     const double p1 = 0.71;
@@ -258,6 +284,7 @@ int main(int argc, char** argv) {
     else if (test == "radware-peak-fit") passed = TestRadwarePeakFit();
     else if (test == "radware-fit-validation") passed = TestRadwareFitValidation();
     else if (test == "mapped-radware-fit") passed = TestMappedRadwareFit();
+    else if (test == "spectrum-alignment") passed = TestSpectrumAlignment();
     else if (test == "fit-quadratic") passed = TestFitQuadratic();
     else if (test == "fit-validation") passed = TestFitValidation();
     else {
