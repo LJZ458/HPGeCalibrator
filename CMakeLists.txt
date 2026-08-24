@@ -5,25 +5,42 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(ROOT 6.26 REQUIRED COMPONENTS Core RIO Hist Graf Gpad Gui Spectrum Tree)
-include(${ROOT_USE_FILE})
+find_package(ROOT 6.26 REQUIRED COMPONENTS Core RIO Hist Spectrum)
+
+# Debian packages expose Qt through the normal CMake prefix. Homebrew keeps it
+# keg-only, so discover that prefix automatically when no Qt hint was supplied.
+find_package(Qt6 6.4 QUIET COMPONENTS Widgets)
+if(APPLE AND NOT Qt6_FOUND AND NOT DEFINED Qt6_DIR)
+    find_program(HOMEBREW_EXECUTABLE brew)
+    if(HOMEBREW_EXECUTABLE)
+        execute_process(COMMAND ${HOMEBREW_EXECUTABLE} --prefix qt
+                        OUTPUT_VARIABLE HOMEBREW_QT_PREFIX
+                        OUTPUT_STRIP_TRAILING_WHITESPACE
+                        ERROR_QUIET)
+        if(HOMEBREW_QT_PREFIX)
+            set(Qt6_DIR "${HOMEBREW_QT_PREFIX}/lib/cmake/Qt6")
+        endif()
+    endif()
+endif()
+find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets)
 
 add_library(hpge_core
     src/CalibrationEngine.cpp
     src/RootDataRepository.cpp
 )
 target_include_directories(hpge_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(hpge_core PUBLIC ROOT::Core ROOT::RIO ROOT::Hist ROOT::Graf ROOT::Spectrum)
+target_link_libraries(hpge_core PUBLIC ROOT::Core ROOT::RIO ROOT::Hist ROOT::Spectrum)
 
 add_executable(hpge-calibrator
     src/main.cpp
     src/MainWindow.cpp
+    src/SpectrumPlotWidget.cpp
 )
 target_include_directories(hpge-calibrator PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_link_libraries(hpge-calibrator PRIVATE
-    hpge_core ROOT::Gui ROOT::Gpad ROOT::Tree
+    hpge_core Qt6::Widgets
 )
 
 add_executable(hpge-generate-sample tools/generate_sample.cpp)
@@ -66,13 +83,23 @@ if(BUILD_TESTING)
     add_test(NAME sample-generator
              COMMAND hpge-generate-sample ${CMAKE_CURRENT_BINARY_DIR}/hpge_test_sample.root)
 
-    if(UNIX AND NOT APPLE)
-        add_test(NAME startup-headless-guard COMMAND hpge-calibrator)
-        set_tests_properties(startup-headless-guard PROPERTIES
-            ENVIRONMENT "DISPLAY="
-            WILL_FAIL TRUE
-        )
-    endif()
+    add_executable(hpge-plot-tests
+        tests/test_plot_widget.cpp
+        src/SpectrumPlotWidget.cpp
+    )
+    target_include_directories(hpge-plot-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(hpge-plot-tests PRIVATE Qt6::Widgets)
+    add_test(NAME qt-plot-interaction COMMAND hpge-plot-tests)
+    set_tests_properties(qt-plot-interaction PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_test(NAME qt-gui-startup COMMAND hpge-calibrator --check-startup)
+    set_tests_properties(qt-gui-startup PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_test(NAME qt-gui-root-file-workflow
+             COMMAND hpge-calibrator ${CMAKE_CURRENT_BINARY_DIR}/hpge_test_sample.root --check-startup)
+    set_tests_properties(qt-gui-root-file-workflow PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        DEPENDS sample-generator)
 endif()
 
 install(TARGETS hpge-calibrator hpge-generate-sample RUNTIME DESTINATION bin)

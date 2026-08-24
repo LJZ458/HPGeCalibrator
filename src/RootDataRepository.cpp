@@ -1,6 +1,5 @@
 #include "RootDataRepository.h"
 
-#include <TClass.h>
 #include <TDirectory.h>
 #include <TFile.h>
 #include <TH1D.h>
@@ -21,25 +20,24 @@ void DiscoverDirectory(TDirectory& directory, const std::string& prefix,
     while (auto* key = dynamic_cast<TKey*>(next())) {
         const std::string name = key->GetName();
         const std::string objectPath = prefix.empty() ? name : prefix + "/" + name;
-        TClass* klass = TClass::GetClass(key->GetClassName());
-        if (!klass) continue;
-        if (klass->InheritsFrom(TDirectory::Class())) {
-            if (auto* child = directory.GetDirectory(name.c_str())) {
-                DiscoverDirectory(*child, objectPath, filePath, output);
-            }
-        } else if (klass->InheritsFrom(TH2::Class())) {
-            auto* histogram = dynamic_cast<TH2*>(directory.Get(name.c_str()));
-            if (!histogram) continue;
-            HistogramDescriptor descriptor;
-            descriptor.id = filePath + "::" + objectPath;
-            descriptor.filePath = filePath;
-            descriptor.objectPath = objectPath;
-            descriptor.displayName = std::filesystem::path(filePath).filename().string() +
-                                     " :: " + objectPath;
-            descriptor.xBins = histogram->GetNbinsX();
-            descriptor.yBins = histogram->GetNbinsY();
-            output.push_back(std::move(descriptor));
+        // Ask the directory directly instead of resolving every key through
+        // TClass. This keeps browsing on ROOT's compiled I/O/dictionary path
+        // and avoids unnecessarily starting Cling for each object.
+        if (auto* child = directory.GetDirectory(name.c_str())) {
+            DiscoverDirectory(*child, objectPath, filePath, output);
+            continue;
         }
+        auto* histogram = dynamic_cast<TH2*>(directory.Get(name.c_str()));
+        if (!histogram) continue;
+        HistogramDescriptor descriptor;
+        descriptor.id = filePath + "::" + objectPath;
+        descriptor.filePath = filePath;
+        descriptor.objectPath = objectPath;
+        descriptor.displayName = std::filesystem::path(filePath).filename().string() +
+                                 " :: " + objectPath;
+        descriptor.xBins = histogram->GetNbinsX();
+        descriptor.yBins = histogram->GetNbinsY();
+        output.push_back(std::move(descriptor));
     }
 }
 
@@ -126,4 +124,3 @@ std::shared_ptr<TH1D> RootDataRepository::ProjectCrystal(
 void RootDataRepository::ClearCache() { cache_.clear(); }
 
 } // namespace hpge
-
