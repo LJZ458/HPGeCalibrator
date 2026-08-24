@@ -1,0 +1,6 @@
+/build/
+/cmake-build-*/
+*.root
+*.csv
+.DS_Store
+
