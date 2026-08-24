@@ -46,10 +46,12 @@ struct CalibrationPoint {
 
 struct PeakMatchResult {
     bool success = false;
+    std::vector<double> referenceCharges;
     std::vector<double> charges;
     std::vector<bool> matched;
     double scale = 1.0;
     double offset = 0.0;
+    double quadratic = 0.0;
     double score = 0.0;
 };
 

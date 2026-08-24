@@ -32,6 +32,16 @@ public:
                                                const std::vector<double>& referenceCharges,
                                                const SearchOptions& options);
 
+    static PeakMatchResult AlignSpectrumPatterns(const TH1& reference,
+                                                 const TH1& target,
+                                                 const SearchOptions& options);
+
+    static double MapReferenceCharge(const PeakMatchResult& alignment,
+                                     double referenceCharge);
+
+    static double MapTargetChargeToReference(const PeakMatchResult& alignment,
+                                             double targetCharge);
+
     static CalibrationResult FitSecondOrder(int crystal,
                                             std::vector<CalibrationPoint> points,
                                             double residualRmsLimitKeV);

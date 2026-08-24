@@ -42,6 +42,7 @@ private:
         kPreviewReference,
         kHistogramList,
         kReferenceHistogram,
+        kReferenceSource,
         kOrientation,
         kEnergyList,
         kRemoveReferencePeak,
@@ -54,15 +55,18 @@ private:
         kShowSpectrum,
         kShowCalibration,
         kManualHistogram,
+        kManualSource,
         kManualEnergyList,
         kRemoveManualPeak,
         kRefitCrystal,
-        kExportCsv
+        kExportCsv,
+        kMouseMode
     };
 
     struct EnergyLine {
         double energy = 0.0;
         std::string label;
+        std::string source;
     };
 
     struct ManualPeak {
@@ -79,6 +83,8 @@ private:
     void BuildPeaksTab(TGCompositeFrame* parent);
     void BuildCalibrationTab(TGCompositeFrame* parent);
     void PopulateEnergyLines();
+    void RefreshEnergyList(TGListBox* list, const TGComboBox* sourceCombo,
+                           std::vector<std::size_t>& indices);
     void AddRootFiles();
     void RefreshDatasetWidgets();
     std::vector<int> SelectedDescriptorIndices() const;
@@ -109,10 +115,15 @@ private:
     void ExportCsv();
     void SetStatus(const std::string& text);
     double ClickCharge(Int_t px) const;
+    bool MouseZoomEnabled() const;
+    void UpdateCanvasInteractionMode();
 
     RootDataRepository repository_;
     std::vector<HistogramDescriptor> descriptors_;
     std::vector<EnergyLine> energyLines_;
+    std::vector<std::string> energySources_;
+    std::vector<std::size_t> referenceEnergyIndices_;
+    std::vector<std::size_t> manualEnergyIndices_;
     std::vector<ReferencePeak> referencePeaks_;
     std::vector<ManualPeak> manualPeaks_;
     std::map<int, CalibrationResult> results_;
@@ -132,6 +143,7 @@ private:
     TGComboBox* orientationCombo_ = nullptr;
     TGNumberEntry* referenceCrystalEntry_ = nullptr;
     TGComboBox* referenceHistogramCombo_ = nullptr;
+    TGComboBox* referenceSourceCombo_ = nullptr;
     TGListBox* energyList_ = nullptr;
     TGNumberEntry* customEnergyEntry_ = nullptr;
     TGListBox* referencePeakList_ = nullptr;
@@ -142,9 +154,11 @@ private:
     TGNumberEntry* alignmentCrystalEntry_ = nullptr;
     TGListBox* resultList_ = nullptr;
     TGComboBox* manualHistogramCombo_ = nullptr;
+    TGComboBox* manualSourceCombo_ = nullptr;
     TGListBox* manualEnergyList_ = nullptr;
     TGListBox* manualPeakList_ = nullptr;
     TRootEmbeddedCanvas* canvas_ = nullptr;
+    TGComboBox* mouseModeCombo_ = nullptr;
     TGLabel* statusLabel_ = nullptr;
 
 };

@@ -42,6 +42,9 @@ if(BUILD_TESTING)
             radware-fit-validation
             mapped-radware-fit
             spectrum-alignment
+            two-peak-pattern-alignment
+            co56-crystal-pattern-alignment
+            pattern-alignment-validation
             fit-quadratic
             fit-validation)
         add_test(NAME calibration-${test_case}

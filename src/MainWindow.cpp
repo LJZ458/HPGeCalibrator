@@ -18,7 +18,6 @@
 #include <TLine.h>
 #include <TList.h>
 #include <TLatex.h>
-#include <TBox.h>
 #include <TObjString.h>
 #include <TPad.h>
 #include <TRootEmbeddedCanvas.h>
@@ -112,12 +111,12 @@ void BeginSafeCanvasUpdate(TCanvas& canvas) {
     canvas.Clear();
 }
 
-void FinishSafeCanvasUpdate(TCanvas& canvas) {
+void FinishSafeCanvasUpdate(TCanvas& canvas, bool editable) {
     canvas.Modified();
     canvas.Update();
     canvas.SetSelected(nullptr);
     canvas.SetSelectedPad(nullptr);
-    canvas.SetEditable(kFALSE);
+    canvas.SetEditable(editable);
 }
 
 } // namespace
@@ -161,6 +160,15 @@ void MainWindow::BuildInterface() {
     main->AddFrame(tabs_, new TGLayoutHints(kLHintsLeft | kLHintsExpandY, 2, 4, 2, 2));
 
     auto* right = new TGVerticalFrame(main);
+    auto* mouseRow = new TGHorizontalFrame(right);
+    mouseRow->AddFrame(new TGLabel(mouseRow, "Canvas mouse mode:"), Left());
+    mouseModeCombo_ = new TGComboBox(mouseRow, kMouseMode);
+    mouseModeCombo_->Associate(this);
+    mouseModeCombo_->AddEntry("Zoom / pan", 1);
+    mouseModeCombo_->AddEntry("Select peak-fit range", 2);
+    mouseModeCombo_->Select(2, kFALSE);
+    mouseRow->AddFrame(mouseModeCombo_, ExpandX());
+    right->AddFrame(mouseRow, ExpandX(6, 6, 4, 2));
     canvas_ = new PeakCanvas("hpgeCanvas", right, 900, 720, this);
     right->AddFrame(canvas_, ExpandXY());
     statusLabel_ = new TGLabel(right, "");
@@ -234,6 +242,10 @@ void MainWindow::BuildPeaksTab(TGCompositeFrame* parent) {
     layout->AddFrame(referenceHistogramCombo_, ExpandX());
     layout->AddFrame(CommandButton(layout, "Show reference spectrum", kPreviewReference, this), ExpandX());
 
+    layout->AddFrame(new TGLabel(layout, "Radioactive source:"), Left());
+    referenceSourceCombo_ = new TGComboBox(layout, kReferenceSource);
+    referenceSourceCombo_->Associate(this);
+    layout->AddFrame(referenceSourceCombo_, ExpandX());
     layout->AddFrame(new TGLabel(layout, "Known line for the next interval:"), Left());
     energyList_ = new TGListBox(layout, kEnergyList);
     energyList_->Associate(this);
@@ -294,7 +306,7 @@ void MainWindow::BuildCalibrationTab(TGCompositeFrame* parent) {
 
     auto* alignment = new TGGroupFrame(layout, "Pre-calibration spectrum alignment");
     alignment->AddFrame(new TGLabel(alignment,
-        "Overlay a crystal after affine peak mapping to the reference spectrum."), Left());
+        "Overlay a crystal after independent peak-pattern mapping."), Left());
     alignmentHistogramCombo_ = new TGComboBox(alignment, kAlignmentHistogram);
     alignmentHistogramCombo_->Associate(this);
     alignment->AddFrame(alignmentHistogramCombo_, ExpandX());
@@ -314,7 +326,7 @@ void MainWindow::BuildCalibrationTab(TGCompositeFrame* parent) {
         "Results: [OK/REVIEW/FAIL] crystal | peaks | RMS | p0, p1, p2"), Left());
     resultList_ = new TGListBox(layout, kResultList);
     resultList_->Associate(this);
-    resultList_->Resize(440, 180);
+    resultList_->Resize(440, 130);
     layout->AddFrame(resultList_, new TGLayoutHints(kLHintsExpandX, 3, 3, 2, 3));
     auto* viewButtons = new TGHorizontalFrame(layout);
     viewButtons->AddFrame(CommandButton(viewButtons, "Show spectrum", kShowSpectrum, this), ExpandX());
@@ -326,15 +338,19 @@ void MainWindow::BuildCalibrationTab(TGCompositeFrame* parent) {
     manualHistogramCombo_ = new TGComboBox(manual, kManualHistogram);
     manualHistogramCombo_->Associate(this);
     manual->AddFrame(manualHistogramCombo_, ExpandX());
+    manual->AddFrame(new TGLabel(manual, "Radioactive source:"), Left());
+    manualSourceCombo_ = new TGComboBox(manual, kManualSource);
+    manualSourceCombo_->Associate(this);
+    manual->AddFrame(manualSourceCombo_, ExpandX());
     manualEnergyList_ = new TGListBox(manual, kManualEnergyList);
     manualEnergyList_->Associate(this);
-    manualEnergyList_->Resize(420, 100);
+    manualEnergyList_->Resize(420, 70);
     manual->AddFrame(manualEnergyList_, new TGLayoutHints(kLHintsExpandX, 3, 3, 2, 3));
     manual->AddFrame(new TGLabel(manual,
         "Peak picking: click lower bound, then upper bound."), Left());
     manualPeakList_ = new TGListBox(manual);
     manualPeakList_->Associate(this);
-    manualPeakList_->Resize(420, 90);
+    manualPeakList_->Resize(420, 65);
     manual->AddFrame(manualPeakList_, new TGLayoutHints(kLHintsExpandX, 3, 3, 2, 3));
     auto* manualButtons = new TGHorizontalFrame(manual);
     manualButtons->AddFrame(CommandButton(manualButtons, "Remove point", kRemoveManualPeak, this), ExpandX());
@@ -348,28 +364,62 @@ void MainWindow::BuildCalibrationTab(TGCompositeFrame* parent) {
 void MainWindow::PopulateEnergyLines() {
     if (energyLines_.empty()) {
         energyLines_ = {
-            {511.000, "annihilation"}, {661.657, "Cs-137"},
-            {846.771, "Co-56"}, {1037.840, "Co-56"},
-            {1173.228, "Co-60"}, {1238.282, "Co-56"},
-            {1274.537, "Na-22"}, {1332.492, "Co-60"},
-            {1460.822, "K-40 background"}, {1771.351, "Co-56"},
-            {2034.755, "Co-56"}, {2598.459, "Co-56"},
-            {2614.511, "Tl-208 background"}, {3201.962, "Co-56"},
-            {3253.416, "Co-56"}
+            {1173.228, "Co-60 line", "Co-60"},
+            {1332.492, "Co-60 line", "Co-60"},
+            {846.771, "Co-56 line", "Co-56"},
+            {1037.840, "Co-56 line", "Co-56"},
+            {1238.282, "Co-56 line", "Co-56"},
+            {1771.351, "Co-56 line", "Co-56"},
+            {2034.755, "Co-56 line", "Co-56"},
+            {2598.459, "Co-56 line", "Co-56"},
+            {3201.962, "Co-56 line", "Co-56"},
+            {3253.416, "Co-56 line", "Co-56"},
+            {661.657, "Cs-137 line", "Cs-137"},
+            {511.000, "annihilation", "Na-22"},
+            {1274.537, "Na-22 line", "Na-22"},
+            {1460.822, "K-40 background", "Background / contaminants"},
+            {2614.511, "Tl-208 background", "Background / contaminants"}
         };
     }
-    auto fill = [&](TGListBox* list) {
-        list->RemoveAll();
-        for (std::size_t i = 0; i < energyLines_.size(); ++i) {
-            const auto& line = energyLines_[i];
+    energySources_ = {"Co-60", "Co-56", "Cs-137", "Na-22",
+                      "Background / contaminants", "Custom"};
+    updatingWidgets_ = true;
+    const int previousReferenceSource = referenceSourceCombo_->GetSelected();
+    const int previousManualSource = manualSourceCombo_->GetSelected();
+    referenceSourceCombo_->RemoveEntries(0, 999999);
+    manualSourceCombo_->RemoveEntries(0, 999999);
+    for (std::size_t index = 0; index < energySources_.size(); ++index) {
+        const int id = static_cast<int>(index) + 1;
+        referenceSourceCombo_->AddEntry(energySources_[index].c_str(), id);
+        manualSourceCombo_->AddEntry(energySources_[index].c_str(), id);
+    }
+    referenceSourceCombo_->Select(previousReferenceSource > 0 ? previousReferenceSource : 1,
+                                  kFALSE);
+    manualSourceCombo_->Select(previousManualSource > 0 ? previousManualSource : 1, kFALSE);
+    referenceSourceCombo_->Layout();
+    manualSourceCombo_->Layout();
+    updatingWidgets_ = false;
+    RefreshEnergyList(energyList_, referenceSourceCombo_, referenceEnergyIndices_);
+    RefreshEnergyList(manualEnergyList_, manualSourceCombo_, manualEnergyIndices_);
+}
+
+void MainWindow::RefreshEnergyList(TGListBox* list, const TGComboBox* sourceCombo,
+                                   std::vector<std::size_t>& indices) {
+    list->RemoveAll();
+    indices.clear();
+    const int sourceIndex = sourceCombo->GetSelected() - 1;
+    if (sourceIndex >= 0 && sourceIndex < static_cast<int>(energySources_.size())) {
+        const auto& source = energySources_[sourceIndex];
+        for (std::size_t index = 0; index < energyLines_.size(); ++index) {
+            const auto& line = energyLines_[index];
+            if (line.source != source) continue;
+            indices.push_back(index);
             const std::string text = FormatNumber(line.energy, 3) + " keV — " + line.label;
-            list->AddEntry(text.c_str(), static_cast<int>(i) + 1);
+            list->AddEntry(text.c_str(), static_cast<int>(indices.size()));
         }
-        if (!energyLines_.empty()) list->Select(1);
-        list->Layout();
-    };
-    fill(energyList_);
-    fill(manualEnergyList_);
+    }
+    if (!indices.empty()) list->Select(1);
+    list->Layout();
 }
 
 Bool_t MainWindow::ProcessMessage(Longptr_t msg, Longptr_t parm1, Longptr_t parm2) {
@@ -388,10 +438,17 @@ Bool_t MainWindow::ProcessMessage(Longptr_t msg, Longptr_t parm1, Longptr_t parm
         case kAddCustomEnergy: {
             const double energy = customEnergyEntry_->GetNumber();
             if (energy > 0.0) {
-                energyLines_.push_back({energy, "custom"});
+                energyLines_.push_back({energy, "user supplied", "Custom"});
                 PopulateEnergyLines();
-                energyList_->Select(static_cast<int>(energyLines_.size()));
-                manualEnergyList_->Select(static_cast<int>(energyLines_.size()));
+                const int customSource = static_cast<int>(energySources_.size());
+                updatingWidgets_ = true;
+                referenceSourceCombo_->Select(customSource, kFALSE);
+                manualSourceCombo_->Select(customSource, kFALSE);
+                updatingWidgets_ = false;
+                RefreshEnergyList(energyList_, referenceSourceCombo_, referenceEnergyIndices_);
+                RefreshEnergyList(manualEnergyList_, manualSourceCombo_, manualEnergyIndices_);
+                energyList_->Select(static_cast<int>(referenceEnergyIndices_.size()));
+                manualEnergyList_->Select(static_cast<int>(manualEnergyIndices_.size()));
                 SetStatus("Added custom energy line " + FormatNumber(energy, 3) + " keV.");
             }
             break;
@@ -438,6 +495,13 @@ Bool_t MainWindow::ProcessMessage(Longptr_t msg, Longptr_t parm1, Longptr_t parm
         default: break;
         }
     } else if (GET_SUBMSG(msg) == kCM_COMBOBOX) {
+        if (parm1 == kMouseMode) UpdateCanvasInteractionMode();
+        if (parm1 == kReferenceSource) {
+            RefreshEnergyList(energyList_, referenceSourceCombo_, referenceEnergyIndices_);
+        }
+        if (parm1 == kManualSource) {
+            RefreshEnergyList(manualEnergyList_, manualSourceCombo_, manualEnergyIndices_);
+        }
         if (parm1 == kReferenceHistogram) ShowReferenceSpectrum();
         if (parm1 == kManualHistogram) {
             const int crystal = CurrentResultCrystal();
@@ -569,9 +633,10 @@ const HistogramDescriptor* MainWindow::DescriptorForCombo(const TGComboBox* comb
 }
 
 const MainWindow::EnergyLine* MainWindow::SelectedEnergy(const TGListBox* list) const {
-    const int index = list->GetSelected() - 1;
-    return index >= 0 && index < static_cast<int>(energyLines_.size()) ? &energyLines_[index]
-                                                                      : nullptr;
+    const int visibleIndex = list->GetSelected() - 1;
+    const auto& indices = list == energyList_ ? referenceEnergyIndices_ : manualEnergyIndices_;
+    if (visibleIndex < 0 || visibleIndex >= static_cast<int>(indices.size())) return nullptr;
+    return &energyLines_[indices[visibleIndex]];
 }
 
 void MainWindow::ShowReferenceSpectrum() {
@@ -600,8 +665,8 @@ void MainWindow::ShowCrystalSpectrum(int crystal, const HistogramDescriptor& des
     displayedDatasetId_ = descriptor.id;
     displayedCrystal_ = crystal;
     RedrawDisplayedSpectrum();
-    SetStatus("Showing crystal " + std::to_string(crystal) +
-              ". Select an energy and click the lower and upper peak limits.");
+    SetStatus("Showing crystal " + std::to_string(crystal) + ". Use Zoom / pan to inspect, "
+              "then switch to Select peak-fit range for the two limit clicks.");
 }
 
 void MainWindow::RedrawDisplayedSpectrum() {
@@ -614,20 +679,13 @@ void MainWindow::RedrawDisplayedSpectrum() {
     displayedSpectrum_->SetLineColor(kBlue + 1);
     displayedSpectrum_->Draw("hist");
     DrawSpectrumOverlays();
-    FinishSafeCanvasUpdate(*rootCanvas);
+    FinishSafeCanvasUpdate(*rootCanvas, MouseZoomEnabled());
 }
 
 void MainWindow::DrawPeakFitOverlay(const PeakFitResult& fit, int color, int lineStyle,
                                     const std::string& label) {
     if (!displayedSpectrum_ || !fit.success) return;
     const double maximum = std::max(displayedSpectrum_->GetMaximum(), 1.0);
-    TBox range(fit.rangeLow, 0.0, fit.rangeHigh, maximum);
-    range.SetBit(kNoContextMenu);
-    range.SetFillColorAlpha(color, 0.08);
-    range.SetLineColor(color);
-    range.SetLineStyle(3);
-    range.DrawClone("same");
-
     std::vector<double> fitX(160), fitY(160);
     for (std::size_t index = 0; index < fitX.size(); ++index) {
         fitX[index] = fit.rangeLow + (fit.rangeHigh - fit.rangeLow) *
@@ -663,7 +721,7 @@ void MainWindow::DrawSpectrumOverlays() {
     if (displayedCrystal_ == ReferenceCrystal()) {
         for (const auto& peak : referencePeaks_) {
             if (peak.datasetId == displayedDatasetId_) {
-                DrawPeakFitOverlay(peak.peakFit, kGreen + 2, 2,
+                DrawPeakFitOverlay(peak.peakFit, kRed + 1, 1,
                                    FormatNumber(peak.energy, 1) + " keV");
             }
         }
@@ -672,8 +730,7 @@ void MainWindow::DrawSpectrumOverlays() {
     if (result != results_.end()) {
         for (const auto& point : result->second.points) {
             if (point.datasetId == displayedDatasetId_) {
-                DrawPeakFitOverlay(point.peakFit, point.manual ? kMagenta + 1 : kRed + 1,
-                                   point.manual ? 7 : 1,
+                DrawPeakFitOverlay(point.peakFit, kRed + 1, point.manual ? 7 : 1,
                                    FormatNumber(point.energy, 1) + " keV");
             }
         }
@@ -688,7 +745,7 @@ void MainWindow::DrawSpectrumOverlays() {
                            std::abs(point.charge - peak.peakFit.centroid) < 1e-6;
                 });
         if (!alreadyApplied) {
-            DrawPeakFitOverlay(peak.peakFit, kMagenta + 1, 7,
+            DrawPeakFitOverlay(peak.peakFit, kRed + 1, 7,
                                FormatNumber(peak.energy, 1) + " keV");
         }
     }
@@ -727,8 +784,29 @@ void MainWindow::ProcessPendingCanvasClick() {
 }
 
 bool MainWindow::CanvasPeakPickingEnabled() const {
-    return displayedSpectrum_ && tabs_ &&
+    return !MouseZoomEnabled() && displayedSpectrum_ && tabs_ &&
            (tabs_->GetCurrent() == 1 || tabs_->GetCurrent() == 2);
+}
+
+bool MainWindow::MouseZoomEnabled() const {
+    return mouseModeCombo_ && mouseModeCombo_->GetSelected() == 1;
+}
+
+void MainWindow::UpdateCanvasInteractionMode() {
+    pendingCanvasClick_ = false;
+    if (peakClickTimer_) peakClickTimer_->Stop();
+    auto* rootCanvas = canvas_ ? canvas_->GetCanvas() : nullptr;
+    if (rootCanvas) {
+        rootCanvas->SetSelected(nullptr);
+        rootCanvas->SetSelectedPad(nullptr);
+        rootCanvas->SetEditable(MouseZoomEnabled());
+    }
+    if (MouseZoomEnabled()) {
+        pendingRangeStart_.reset();
+        SetStatus("Zoom / pan mode: drag on an axis to zoom. Switch mouse mode to select a peak.");
+    } else {
+        SetStatus("Peak-range mode: click the lower and upper limits; zooming is disabled.");
+    }
 }
 
 void MainWindow::HandleRangeClick(double charge) {
@@ -770,7 +848,8 @@ void MainWindow::AddReferencePeak(const PeakFitResult& fit) {
         [&](const ReferencePeak& peak) {
             return peak.datasetId == descriptor->id && std::abs(peak.energy - energy->energy) < 1e-6;
         });
-    ReferencePeak peak{descriptor->id, fit.centroid, energy->energy, energy->label, fit};
+    ReferencePeak peak{descriptor->id, fit.centroid, energy->energy,
+                       energy->source + " / " + energy->label, fit};
     if (duplicate == referencePeaks_.end()) referencePeaks_.push_back(std::move(peak));
     else *duplicate = std::move(peak);
     RefreshReferencePeakList();
@@ -794,7 +873,8 @@ void MainWindow::AddManualPeak(const PeakFitResult& fit) {
             return peak.datasetId == descriptor->id && peak.crystal == crystal &&
                    std::abs(peak.energy - energy->energy) < 1e-6;
         });
-    ManualPeak peak{descriptor->id, crystal, fit.centroid, energy->energy, energy->label, fit};
+    ManualPeak peak{descriptor->id, crystal, fit.centroid, energy->energy,
+                    energy->source + " / " + energy->label, fit};
     if (duplicate == manualPeaks_.end()) manualPeaks_.push_back(std::move(peak));
     else *duplicate = std::move(peak);
     RefreshManualPeakList();
@@ -860,22 +940,23 @@ std::vector<CalibrationPoint> MainWindow::BuildPointsForCrystal(int crystal) {
         }
 
         std::string error;
+        auto referenceSpectrum = repository_.ProjectCrystal(
+            descriptor, ReferenceCrystal(), Orientation(), error);
+        if (!referenceSpectrum) continue;
         auto spectrum = repository_.ProjectCrystal(descriptor, crystal, Orientation(), error);
         if (!spectrum) continue;
-        std::vector<double> referenceCharges;
-        for (const auto& ref : references) referenceCharges.push_back(ref.charge);
-        const auto matches = CalibrationEngine::MatchReferencePeaks(*spectrum, referenceCharges, options);
+        const auto matches = CalibrationEngine::AlignSpectrumPatterns(
+            *referenceSpectrum, *spectrum, options);
+        if (!matches.success) continue;
         for (std::size_t i = 0; i < references.size(); ++i) {
-            if (i < matches.matched.size() && matches.matched[i]) {
-                const double mappedLow = matches.offset + matches.scale *
-                                                         references[i].peakFit.rangeLow;
-                const double mappedHigh = matches.offset + matches.scale *
-                                                          references[i].peakFit.rangeHigh;
-                const auto fit = CalibrationEngine::FitRadwarePeak(*spectrum, mappedLow, mappedHigh);
-                if (fit.success) {
-                    points.push_back({descriptor.id, fit.centroid, references[i].energy,
-                                      fit.centroidError, false, 0.0, fit});
-                }
+            const double mappedLow = CalibrationEngine::MapReferenceCharge(
+                matches, references[i].peakFit.rangeLow);
+            const double mappedHigh = CalibrationEngine::MapReferenceCharge(
+                matches, references[i].peakFit.rangeHigh);
+            const auto fit = CalibrationEngine::FitRadwarePeak(*spectrum, mappedLow, mappedHigh);
+            if (fit.success) {
+                points.push_back({descriptor.id, fit.centroid, references[i].energy,
+                                  fit.centroidError, false, 0.0, fit});
             }
         }
     }
@@ -939,19 +1020,6 @@ void MainWindow::ShowSpectrumAlignment() {
         SetStatus("Choose a source histogram for the alignment preview.");
         return;
     }
-    std::vector<ReferencePeak> references;
-    for (const auto& peak : referencePeaks_) {
-        if (peak.datasetId == descriptor->id) references.push_back(peak);
-    }
-    if (references.empty()) {
-        SetStatus("Select at least one reference peak on this histogram before alignment.");
-        return;
-    }
-    std::sort(references.begin(), references.end(),
-              [](const ReferencePeak& left, const ReferencePeak& right) {
-                  return left.charge < right.charge;
-              });
-
     const int referenceCrystal = ReferenceCrystal();
     const int targetCrystal = std::clamp(
         static_cast<int>(alignmentCrystalEntry_->GetIntNumber()), 0, 63);
@@ -969,14 +1037,11 @@ void MainWindow::ShowSpectrumAlignment() {
         return;
     }
 
-    std::vector<double> referenceCharges;
-    referenceCharges.reserve(references.size());
-    for (const auto& peak : references) referenceCharges.push_back(peak.peakFit.centroid);
     CalibrationEngine::SearchOptions options;
     options.sigmaBins = sigmaEntry_->GetNumber();
     options.threshold = thresholdEntry_->GetNumber();
-    const auto match = CalibrationEngine::MatchReferencePeaks(
-        *targetSpectrum, referenceCharges, options);
+    const auto match = CalibrationEngine::AlignSpectrumPatterns(
+        *referenceSpectrum, *targetSpectrum, options);
     if (!match.success || !(match.scale > 0.0) || !std::isfinite(match.scale) ||
         !std::isfinite(match.offset)) {
         SetStatus("Could not align this spectrum: not enough corresponding peaks were found.");
@@ -997,7 +1062,7 @@ void MainWindow::ShowSpectrumAlignment() {
     for (int bin = 1; bin <= targetSpectrum->GetNbinsX(); ++bin) {
         const std::size_t index = static_cast<std::size_t>(bin - 1);
         const double targetCharge = targetSpectrum->GetXaxis()->GetBinCenter(bin);
-        alignedX[index] = (targetCharge - match.offset) / match.scale;
+        alignedX[index] = CalibrationEngine::MapTargetChargeToReference(match, targetCharge);
         alignedY[index] = targetSpectrum->GetBinContent(bin) / targetMaximum;
     }
 
@@ -1029,8 +1094,10 @@ void MainWindow::ShowSpectrumAlignment() {
     targetGraph.SetLineWidth(2);
     auto* drawnTarget = dynamic_cast<TGraph*>(targetGraph.DrawClone("L same"));
 
-    for (const auto& reference : references) {
-        TLine marker(reference.peakFit.centroid, 0.0, reference.peakFit.centroid, 1.05);
+    for (std::size_t index = 0; index < match.matched.size(); ++index) {
+        if (!match.matched[index]) continue;
+        TLine marker(match.referenceCharges[index], 0.0,
+                     match.referenceCharges[index], 1.05);
         marker.SetBit(kNoContextMenu);
         marker.SetLineColor(kGreen + 2);
         marker.SetLineStyle(3);
@@ -1042,14 +1109,15 @@ void MainWindow::ShowSpectrumAlignment() {
     legend.AddEntry(drawnReference, ("Reference C" + std::to_string(referenceCrystal)).c_str(), "l");
     legend.AddEntry(drawnTarget, ("Aligned C" + std::to_string(targetCrystal)).c_str(), "l");
     legend.DrawClone("same");
-    FinishSafeCanvasUpdate(*rootCanvas);
+    FinishSafeCanvasUpdate(*rootCanvas, MouseZoomEnabled());
 
     const int matchedCount = static_cast<int>(
         std::count(match.matched.begin(), match.matched.end(), true));
     SetStatus("Alignment preview: " + std::to_string(matchedCount) + "/" +
-              std::to_string(referenceCharges.size()) + " peaks, target charge = " +
+              std::to_string(match.referenceCharges.size()) + " detected pattern peaks, target charge = " +
               FormatNumber(match.offset, 3) + " + " + FormatNumber(match.scale, 6) +
-              " x reference charge. No energy calibration has been applied.");
+              " x q + " + FormatNumber(match.quadratic, 9) +
+              " x q^2. No energy calibration has been applied.");
 }
 
 void MainWindow::RefitSelectedCrystal() {
@@ -1137,7 +1205,7 @@ void MainWindow::ShowSelectedCalibration() {
     zero.SetLineStyle(2);
     zero.DrawClone();
     rootCanvas->cd(0);
-    FinishSafeCanvasUpdate(*rootCanvas);
+    FinishSafeCanvasUpdate(*rootCanvas, MouseZoomEnabled());
     SetStatus("Crystal " + std::to_string(crystal) + ": " + result.status);
 }
 

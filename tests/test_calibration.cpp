@@ -2,6 +2,7 @@
 
 #include <TH1D.h>
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -38,6 +39,35 @@ TH1D MakeSpectrum(const char* name, const std::vector<double>& centers,
     }
     histogram.SetEntries(100000.0);
     return histogram;
+}
+
+TH1D MakeVariableIntensitySpectrum(const char* name,
+                                   const std::vector<double>& centers,
+                                   const std::vector<double>& amplitudes,
+                                   double scale, double offset,
+                                   const std::vector<double>& extraPeaks = {},
+                                   double quadratic = 0.0) {
+    TH1D histogram(name, name, 4096, 0.0, 4096.0);
+    for (int bin = 1; bin <= histogram.GetNbinsX(); ++bin) {
+        const double x = histogram.GetBinCenter(bin);
+        double value = 4.0 + 0.001 * x + 0.7 * std::sin(0.021 * x);
+        for (std::size_t index = 0; index < centers.size(); ++index) {
+            const double mapped = offset + scale * centers[index] +
+                                  quadratic * centers[index] * centers[index];
+            value += amplitudes[index] *
+                     std::exp(-0.5 * std::pow((x - mapped) / 3.5, 2));
+        }
+        for (double extra : extraPeaks) {
+            value += 550.0 * std::exp(-0.5 * std::pow((x - extra) / 4.0, 2));
+        }
+        histogram.SetBinContent(bin, std::max(value, 0.0));
+    }
+    histogram.SetEntries(150000.0);
+    return histogram;
+}
+
+double ChargeForEnergy(double energy, double p0, double p1, double p2) {
+    return (-p1 + std::sqrt(p1 * p1 - 4.0 * p2 * (p0 - energy))) / (2.0 * p2);
 }
 
 bool TestFindPeaks() {
@@ -185,29 +215,102 @@ bool TestMappedRadwareFit() {
 }
 
 bool TestSpectrumAlignment() {
-    const std::vector<double> reference{500.0, 1100.0, 1900.0, 2850.0};
-    const double expectedScale = 1.13;
-    const double expectedOffset = -28.0;
-    auto target = MakeSpectrum("alignment_preview", reference,
-                               expectedScale, expectedOffset);
+    const std::vector<double> peaks{470.0, 840.0, 1190.0, 1760.0, 2300.0, 3010.0};
+    const double expectedScale = 1.075;
+    const double expectedOffset = 31.0;
+    const double expectedQuadratic = 1.2e-5;
+    auto reference = MakeVariableIntensitySpectrum(
+        "alignment_reference", peaks, {1100.0, 280.0, 850.0, 420.0, 730.0, 330.0},
+        1.0, 0.0, {3650.0});
+    auto target = MakeVariableIntensitySpectrum(
+        "alignment_target", peaks, {260.0, 1050.0, 310.0, 900.0, 390.0, 780.0},
+        expectedScale, expectedOffset, {330.0, 3550.0}, expectedQuadratic);
     hpge::CalibrationEngine::SearchOptions options;
-    const auto match = hpge::CalibrationEngine::MatchReferencePeaks(target, reference, options);
+    const auto match = hpge::CalibrationEngine::AlignSpectrumPatterns(reference, target, options);
     if (!match.success || !(match.scale > 0.0)) {
         std::cerr << "Pre-calibration spectrum alignment failed\n";
         return false;
     }
-    bool aligned = true;
-    for (std::size_t index = 0; index < reference.size(); ++index) {
-        if (!match.matched[index]) {
-            std::cerr << "Alignment preview missed peak " << index << '\n';
-            aligned = false;
-            continue;
-        }
-        const double commonCharge = (match.charges[index] - match.offset) / match.scale;
-        aligned &= Near(commonCharge, reference[index], 2.0,
-                        "aligned preview peak " + std::to_string(index));
+    const int matched = static_cast<int>(
+        std::count(match.matched.begin(), match.matched.end(), true));
+    return matched >= 5 &&
+           Near(match.scale, expectedScale, 0.01, "intensity-independent alignment scale") &&
+           Near(match.offset, expectedOffset, 8.0, "intensity-independent alignment offset") &&
+           Near(match.quadratic, expectedQuadratic, 3e-6,
+                "intensity-independent alignment curvature") &&
+           Near(hpge::CalibrationEngine::MapTargetChargeToReference(
+                    match, hpge::CalibrationEngine::MapReferenceCharge(match, 2500.0)),
+                2500.0, 0.2, "alignment forward/inverse mapping");
+}
+
+bool TestTwoPeakPatternAlignment() {
+    const std::vector<double> peaks{1450.0, 1690.0};
+    auto reference = MakeVariableIntensitySpectrum(
+        "co60_pattern_reference", peaks, {1200.0, 500.0}, 1.0, 0.0);
+    auto target = MakeVariableIntensitySpectrum(
+        "co60_pattern_target", peaks, {350.0, 1300.0}, 1.04, 22.0);
+    hpge::CalibrationEngine::SearchOptions options;
+    const auto match = hpge::CalibrationEngine::AlignSpectrumPatterns(reference, target, options);
+    return match.success &&
+           Near(match.scale, 1.04, 0.01, "two-peak pattern scale") &&
+           Near(match.offset, 22.0, 8.0, "two-peak pattern offset");
+}
+
+bool TestCo56CrystalPatternAlignment() {
+    const std::vector<double> energies{846.771, 1037.840, 1238.282,
+                                       1771.351, 2598.459, 3201.962};
+    std::vector<double> referenceCharges;
+    std::vector<double> targetCharges;
+    for (double energy : energies) {
+        referenceCharges.push_back(ChargeForEnergy(energy, -1.5, 0.6800, 1.80e-5));
+        targetCharges.push_back(ChargeForEnergy(energy, 0.9, 0.7240, 2.25e-5));
     }
-    return aligned;
+    auto reference = MakeVariableIntensitySpectrum(
+        "co56_crystal_reference", referenceCharges,
+        {1200.0, 250.0, 900.0, 350.0, 700.0, 420.0}, 1.0, 0.0, {3800.0});
+    auto target = MakeVariableIntensitySpectrum(
+        "co56_crystal_target", targetCharges,
+        {300.0, 1100.0, 270.0, 850.0, 400.0, 760.0}, 1.0, 0.0, {420.0});
+    hpge::CalibrationEngine::SearchOptions options;
+    const auto match = hpge::CalibrationEngine::AlignSpectrumPatterns(reference, target, options);
+    if (!match.success) {
+        std::cerr << "Co-56 crystal pattern alignment failed\n";
+        return false;
+    }
+    bool accurate = true;
+    for (std::size_t index = 0; index < referenceCharges.size(); ++index) {
+        accurate &= Near(hpge::CalibrationEngine::MapReferenceCharge(
+                             match, referenceCharges[index]),
+                         targetCharges[index], 10.0,
+                         "Co-56 mapped charge " + std::to_string(index));
+    }
+    return accurate;
+}
+
+bool TestPatternAlignmentValidation() {
+    TH1D emptyReference("empty_pattern_reference", "empty", 100, 0.0, 100.0);
+    TH1D emptyTarget("empty_pattern_target", "empty", 100, 0.0, 100.0);
+    hpge::CalibrationEngine::SearchOptions options;
+    const auto empty = hpge::CalibrationEngine::AlignSpectrumPatterns(
+        emptyReference, emptyTarget, options);
+    if (empty.success || !empty.referenceCharges.empty()) {
+        std::cerr << "Empty spectra were accepted for pattern alignment\n";
+        return false;
+    }
+    auto oneReference = MakeSpectrum("one_pattern_reference", {1000.0});
+    auto oneTarget = MakeSpectrum("one_pattern_target", {1000.0}, 1.1, 20.0);
+    const auto single = hpge::CalibrationEngine::AlignSpectrumPatterns(
+        oneReference, oneTarget, options);
+    if (single.success) {
+        std::cerr << "Single peaks were accepted as a spectrum pattern\n";
+        return false;
+    }
+    hpge::PeakMatchResult linear;
+    linear.offset = 17.0;
+    linear.scale = 1.06;
+    const double mapped = hpge::CalibrationEngine::MapReferenceCharge(linear, 1234.0);
+    return Near(hpge::CalibrationEngine::MapTargetChargeToReference(linear, mapped),
+                1234.0, 1e-9, "linear alignment forward/inverse mapping");
 }
 
 bool TestFitQuadratic() {
@@ -285,6 +388,9 @@ int main(int argc, char** argv) {
     else if (test == "radware-fit-validation") passed = TestRadwareFitValidation();
     else if (test == "mapped-radware-fit") passed = TestMappedRadwareFit();
     else if (test == "spectrum-alignment") passed = TestSpectrumAlignment();
+    else if (test == "two-peak-pattern-alignment") passed = TestTwoPeakPatternAlignment();
+    else if (test == "co56-crystal-pattern-alignment") passed = TestCo56CrystalPatternAlignment();
+    else if (test == "pattern-alignment-validation") passed = TestPatternAlignmentValidation();
     else if (test == "fit-quadratic") passed = TestFitQuadratic();
     else if (test == "fit-validation") passed = TestFitValidation();
     else {

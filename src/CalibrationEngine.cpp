@@ -207,6 +207,167 @@ double NearestCandidate(const std::vector<double>& candidates, double expected,
     return best;
 }
 
+std::vector<double> StrongPatternCandidates(const TH1& histogram,
+                                            const CalibrationEngine::SearchOptions& options) {
+    auto patternOptions = options;
+    patternOptions.threshold = std::min(options.threshold, 0.02);
+    patternOptions.maxPeaks = std::max(options.maxPeaks, 48);
+    auto candidates = CalibrationEngine::FindPeakCandidates(histogram, patternOptions);
+    constexpr std::size_t maximumPatternPeaks = 24;
+    if (candidates.size() > maximumPatternPeaks) {
+        std::sort(candidates.begin(), candidates.end(), [&](double left, double right) {
+            const int leftBin = histogram.GetXaxis()->FindBin(left);
+            const int rightBin = histogram.GetXaxis()->FindBin(right);
+            return histogram.GetBinContent(leftBin) > histogram.GetBinContent(rightBin);
+        });
+        candidates.resize(maximumPatternPeaks);
+        std::sort(candidates.begin(), candidates.end());
+    }
+    return candidates;
+}
+
+PeakMatchResult EvaluatePatternTransform(const std::vector<double>& reference,
+                                         const std::vector<double>& target,
+                                         double scale, double offset, double quadratic,
+                                         double tolerance) {
+    PeakMatchResult result;
+    result.referenceCharges = reference;
+    result.charges.assign(reference.size(), 0.0);
+    result.matched.assign(reference.size(), false);
+    result.scale = scale;
+    result.offset = offset;
+    result.quadratic = quadratic;
+    int matchedCount = 0;
+    double normalizedError = 0.0;
+    double firstMatchedReference = 0.0;
+    double lastMatchedReference = 0.0;
+    for (std::size_t index = 0; index < reference.size(); ++index) {
+        const double expected = offset + scale * reference[index] +
+                                quadratic * reference[index] * reference[index];
+        bool found = false;
+        const double matched = NearestCandidate(target, expected, tolerance, found);
+        if (!found) continue;
+        result.charges[index] = matched;
+        result.matched[index] = true;
+        normalizedError += std::abs(matched - expected) / tolerance;
+        if (matchedCount == 0) firstMatchedReference = reference[index];
+        lastMatchedReference = reference[index];
+        ++matchedCount;
+    }
+    const double referenceSpan = reference.size() > 1
+        ? std::max(reference.back() - reference.front(), tolerance)
+        : tolerance;
+    const double coverage = matchedCount > 1
+        ? (lastMatchedReference - firstMatchedReference) / referenceSpan
+        : 0.0;
+    result.score = 100.0 * matchedCount + 25.0 * coverage - normalizedError -
+                   2.0 * std::abs(std::log(scale)) -
+                   0.25 * std::abs(offset) / referenceSpan -
+                   2.0 * std::abs(quadratic) * referenceSpan / std::max(scale, 1e-9);
+    result.success = matchedCount >= 2;
+    return result;
+}
+
+double ScorePatternTransform(const std::vector<double>& reference,
+                             const std::vector<double>& target,
+                             double scale, double offset, double quadratic,
+                             double tolerance) {
+    int matchedCount = 0;
+    double normalizedError = 0.0;
+    double firstMatchedReference = 0.0;
+    double lastMatchedReference = 0.0;
+    for (double referenceCharge : reference) {
+        const double expected = offset + scale * referenceCharge +
+                                quadratic * referenceCharge * referenceCharge;
+        bool found = false;
+        const double matched = NearestCandidate(target, expected, tolerance, found);
+        if (!found) continue;
+        normalizedError += std::abs(matched - expected) / tolerance;
+        if (matchedCount == 0) firstMatchedReference = referenceCharge;
+        lastMatchedReference = referenceCharge;
+        ++matchedCount;
+    }
+    const double referenceSpan = std::max(reference.back() - reference.front(), tolerance);
+    const double coverage = matchedCount > 1
+        ? (lastMatchedReference - firstMatchedReference) / referenceSpan
+        : 0.0;
+    return 100.0 * matchedCount + 25.0 * coverage - normalizedError -
+           2.0 * std::abs(std::log(scale)) -
+           0.25 * std::abs(offset) / referenceSpan -
+           2.0 * std::abs(quadratic) * referenceSpan / std::max(scale, 1e-9);
+}
+
+bool RefinePatternTransform(const PeakMatchResult& match, double& scale, double& offset,
+                            double& quadratic) {
+    int count = 0;
+    double referenceMean = 0.0;
+    double targetMean = 0.0;
+    for (std::size_t index = 0; index < match.matched.size(); ++index) {
+        if (!match.matched[index]) continue;
+        referenceMean += match.referenceCharges[index];
+        targetMean += match.charges[index];
+        ++count;
+    }
+    if (count < 2) return false;
+    referenceMean /= count;
+    targetMean /= count;
+    double referenceScale = 0.0;
+    for (std::size_t index = 0; index < match.matched.size(); ++index) {
+        if (!match.matched[index]) continue;
+        referenceScale = std::max(referenceScale,
+            std::abs(match.referenceCharges[index] - referenceMean));
+    }
+    if (referenceScale <= 0.0) return false;
+    if (count >= 3) {
+        double sums[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+        double rhs[3] = {0.0, 0.0, 0.0};
+        for (std::size_t index = 0; index < match.matched.size(); ++index) {
+            if (!match.matched[index]) continue;
+            const double z = (match.referenceCharges[index] - referenceMean) / referenceScale;
+            double power = 1.0;
+            for (double& sum : sums) {
+                sum += power;
+                power *= z;
+            }
+            rhs[0] += match.charges[index];
+            rhs[1] += match.charges[index] * z;
+            rhs[2] += match.charges[index] * z * z;
+        }
+        double system[3][4] = {
+            {sums[0], sums[1], sums[2], rhs[0]},
+            {sums[1], sums[2], sums[3], rhs[1]},
+            {sums[2], sums[3], sums[4], rhs[2]}
+        };
+        double fitted[3] = {0.0, 0.0, 0.0};
+        if (!SolveThreeByThree(system, fitted)) return false;
+        quadratic = fitted[2] / (referenceScale * referenceScale);
+        scale = fitted[1] / referenceScale - 2.0 * referenceMean * quadratic;
+        offset = fitted[0] - fitted[1] * referenceMean / referenceScale +
+                 fitted[2] * referenceMean * referenceMean /
+                 (referenceScale * referenceScale);
+    } else {
+        double covariance = 0.0;
+        double variance = 0.0;
+        for (std::size_t index = 0; index < match.matched.size(); ++index) {
+            if (!match.matched[index]) continue;
+            const double referenceDelta = match.referenceCharges[index] - referenceMean;
+            covariance += referenceDelta * (match.charges[index] - targetMean);
+            variance += referenceDelta * referenceDelta;
+        }
+        if (variance <= 0.0) return false;
+        scale = covariance / variance;
+        offset = targetMean - scale * referenceMean;
+        quadratic = 0.0;
+    }
+    if (!std::isfinite(scale) || !std::isfinite(offset) || !std::isfinite(quadratic) ||
+        scale <= 0.0) {
+        return false;
+    }
+    const double lowDerivative = scale + 2.0 * quadratic * match.referenceCharges.front();
+    const double highDerivative = scale + 2.0 * quadratic * match.referenceCharges.back();
+    return lowDerivative > 0.0 && highDerivative > 0.0;
+}
+
 } // namespace
 
 std::vector<double> CalibrationEngine::FindPeakCandidates(
@@ -419,6 +580,7 @@ PeakMatchResult CalibrationEngine::MatchReferencePeaks(
     const TH1& target, const std::vector<double>& referenceCharges,
     const SearchOptions& options) {
     PeakMatchResult result;
+    result.referenceCharges = referenceCharges;
     result.charges.assign(referenceCharges.size(), 0.0);
     result.matched.assign(referenceCharges.size(), false);
     if (referenceCharges.empty()) return result;
@@ -500,6 +662,92 @@ PeakMatchResult CalibrationEngine::MatchReferencePeaks(
     result.offset = bestOffset;
     result.score = bestScore;
     return result;
+}
+
+PeakMatchResult CalibrationEngine::AlignSpectrumPatterns(
+    const TH1& reference, const TH1& target, const SearchOptions& options) {
+    const auto referenceCandidates = StrongPatternCandidates(reference, options);
+    const auto targetCandidates = StrongPatternCandidates(target, options);
+    PeakMatchResult best;
+    best.referenceCharges = referenceCandidates;
+    best.charges.assign(referenceCandidates.size(), 0.0);
+    best.matched.assign(referenceCandidates.size(), false);
+    if (referenceCandidates.size() < 2 || targetCandidates.size() < 2) return best;
+
+    const double referenceRange = reference.GetXaxis()->GetXmax() -
+                                  reference.GetXaxis()->GetXmin();
+    const double targetRange = target.GetXaxis()->GetXmax() - target.GetXaxis()->GetXmin();
+    const double tolerance = std::max({
+        3.0 * target.GetXaxis()->GetBinWidth(1),
+        std::min(options.matchToleranceFraction, 0.006) * targetRange,
+        0.003 * std::max(referenceRange, targetRange)});
+    double bestScore = -std::numeric_limits<double>::infinity();
+    for (std::size_t referenceLow = 0; referenceLow + 1 < referenceCandidates.size();
+         ++referenceLow) {
+        for (std::size_t referenceHigh = referenceLow + 1;
+             referenceHigh < referenceCandidates.size(); ++referenceHigh) {
+            const double referenceSeparation =
+                referenceCandidates[referenceHigh] - referenceCandidates[referenceLow];
+            if (referenceSeparation < 4.0 * tolerance) continue;
+            for (std::size_t targetLow = 0; targetLow + 1 < targetCandidates.size(); ++targetLow) {
+                for (std::size_t targetHigh = targetLow + 1;
+                     targetHigh < targetCandidates.size(); ++targetHigh) {
+                    const double scale =
+                        (targetCandidates[targetHigh] - targetCandidates[targetLow]) /
+                        referenceSeparation;
+                    if (scale < 0.25 || scale > 4.0) continue;
+                    const double offset = targetCandidates[targetLow] -
+                                          scale * referenceCandidates[referenceLow];
+                    const double score = ScorePatternTransform(
+                        referenceCandidates, targetCandidates, scale, offset, 0.0, tolerance);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        best = EvaluatePatternTransform(referenceCandidates, targetCandidates,
+                                                        scale, offset, 0.0, tolerance);
+                    }
+                }
+            }
+        }
+    }
+    if (!best.success) return best;
+    for (int iteration = 0; iteration < 3; ++iteration) {
+        double refinedScale = best.scale;
+        double refinedOffset = best.offset;
+        double refinedQuadratic = best.quadratic;
+        if (!RefinePatternTransform(best, refinedScale, refinedOffset, refinedQuadratic)) break;
+        auto refined = EvaluatePatternTransform(referenceCandidates, targetCandidates,
+                                                refinedScale, refinedOffset,
+                                                refinedQuadratic, tolerance);
+        if (!refined.success) break;
+        best = std::move(refined);
+    }
+    const int matchedCount = static_cast<int>(
+        std::count(best.matched.begin(), best.matched.end(), true));
+    const int availablePattern = static_cast<int>(
+        std::min(referenceCandidates.size(), targetCandidates.size()));
+    best.success = matchedCount >= 2 &&
+                   (availablePattern <= 3 || matchedCount >= 3);
+    return best;
+}
+
+double CalibrationEngine::MapReferenceCharge(const PeakMatchResult& alignment,
+                                             double referenceCharge) {
+    return alignment.offset + alignment.scale * referenceCharge +
+           alignment.quadratic * referenceCharge * referenceCharge;
+}
+
+double CalibrationEngine::MapTargetChargeToReference(const PeakMatchResult& alignment,
+                                                     double targetCharge) {
+    const double linearEstimate = (targetCharge - alignment.offset) /
+                                  std::max(alignment.scale, 1e-12);
+    if (std::abs(alignment.quadratic) < 1e-15) return linearEstimate;
+    const double discriminant = alignment.scale * alignment.scale -
+        4.0 * alignment.quadratic * (alignment.offset - targetCharge);
+    if (discriminant < 0.0 || !std::isfinite(discriminant)) return linearEstimate;
+    const double root = std::sqrt(discriminant);
+    const double first = (-alignment.scale + root) / (2.0 * alignment.quadratic);
+    const double second = (-alignment.scale - root) / (2.0 * alignment.quadratic);
+    return std::abs(first - linearEstimate) <= std::abs(second - linearEstimate) ? first : second;
 }
 
 CalibrationResult CalibrationEngine::FitSecondOrder(
