@@ -25,11 +25,13 @@ The application runs on macOS and Linux with Qt 6 and a CERN ROOT installation. 
 - Provides separate **Zoom / pan** and **Select peak-fit range** mouse modes so inspecting a spectrum cannot accidentally create a fit interval. Wheel zoom and right-drag pan remain available while selecting fit limits; Back, Zoom −, Zoom +, Reset, left-drag zoom, and double-click reset provide ROOT-like navigation. The zoom window stays fixed when modes change or fitted overlays are added.
 - Uses a custom Qt plot widget, so ROOT object selection, class/editor panels, and canvas callbacks cannot interrupt spectrum interaction.
 - Combines peak points from multiple source histograms into one quadratic fit per crystal.
-- Displays calibration curves and per-line residuals, and flags high-RMS or exactly determined fits for review.
+- Displays calibration curves and per-line residuals versus assigned peak energy, and flags high-RMS or exactly determined fits for review.
 - Lets the user replace any automatically matched point by selecting a new range in a problematic crystal and refitting it.
 - Binds manual corrections to the single crystal highlighted in the calibration-results list and labels the correction panel with that crystal number.
 - Extends calibration and residual plot axes beyond the outermost data points so the second-order trend and edge residuals have visual context.
-- Exports coefficients, fit statistics, calibration points, peak-fit parameters, manual/automatic status, and residuals to CSV.
+- After the individual fits, transforms and sums every successful crystal in energy space for each source, refits the combined peaks, and reports centroid residual, FWHM in keV, and percentage energy resolution.
+- Exports coefficients, fit statistics, calibration points, peak-fit parameters, manual/automatic status, combined-spectrum residual/FWHM results, and resolution to CSV.
+- Writes a companion C++ header containing three 64-element coefficient arrays—`p0`, `p1`, and `p2`—indexed directly by crystal number.
 
 ## Prerequisites
 
@@ -67,12 +69,13 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-The test suite reports twenty-two focused checks separately: peak discovery and refinement,
+The test suite reports twenty-four focused checks separately: peak discovery and refinement,
 single- and multi-peak mapping, RadWare peak fitting and validation, mapped interval fitting,
 intensity-independent and two-line pattern alignment, wide-range Co-56 crystal alignment and
 alignment validation, quadratic fitting and validation, recursive histogram discovery/cache loading, both TH2 axis
 orientations, repeated multi-file projection/cache cycling, repository error handling, and sample
-ROOT-file generation, plus Qt plot interaction/rendering, offscreen GUI startup, and a full
+ROOT-file generation, combined calibrated-spectrum/FWHM analysis, three-list C++ export,
+Qt plot interaction/rendering, offscreen GUI startup, and a full
 GUI open/discover/project/render check using the generated ROOT file.
 
 Run the application:
@@ -109,7 +112,9 @@ If Qt reports that the `xcb` platform plugin cannot be initialized on a minimal 
 3. In **Calibration & review**, choose a histogram and target crystal under **Pre-calibration spectrum alignment**, then click **Show aligned spectra**. The blue reference and red target spectra are normalized and overlaid after independent peak-pattern mapping; no user-selected energy lines or peak intensities are used. The status bar reports the matched-pattern count and charge-mapping coefficients. This is intentionally a rough charge-axis diagnostic—every calibration peak is subsequently refitted, and no energy calibration is applied in the preview.
 4. Adjust peak-search parameters if necessary and calibrate the selected crystals. At least three total reference points are required for a quadratic fit; four or more provide a meaningful residual-based quality check.
 5. Select any `REVIEW` or `FAIL` result. Choose its source histogram and energy, show the spectrum, click the lower and upper limits around the correct peak, and press **Refit crystal**. A manual centroid replaces the automatic point for that dataset and energy. After refitting, the spectrum stays visible with the fitted peak overlays.
-6. Inspect **Fit + residuals**, then export the complete result table to CSV.
+6. Inspect **Fit + residuals**; residual x coordinates are the assigned peak energies rather than charge centroids.
+7. Under **Combined calibrated spectrum quality**, select each source and inspect the summed energy spectrum, combined-line residuals, FWHM, and percentage resolution.
+8. Export the complete CSV. The same action also writes `<csv-name>_coefficients.hpp` with separate `p0`, `p1`, and `p2` C++ arrays for crystals 0–63; unfitted crystals contain a `missing` NaN placeholder.
 
 ## Histogram convention
 
@@ -129,7 +134,9 @@ Load both histograms under the `sources` directory. On crystal 0, select the two
 
 ## Calibration output
 
-CSV output contains one `fit` row per crystal followed by one `point` row per calibration line. Fit rows include `p0`, `p1`, `p2`, chi-square, degrees of freedom, residual RMS, and review status. Point rows include dataset identity, fitted centroid and uncertainty, selected range, peak sigma, RadWare fit statistics and tail/step parameters, assigned energy, residual, and whether the point was manually overridden.
+CSV output contains one `fit` row per crystal followed by one `point` row per calibration line. Fit rows include `p0`, `p1`, `p2`, chi-square, degrees of freedom, residual RMS, and review status. Point rows include dataset identity, fitted centroid and uncertainty, selected range, peak sigma, RadWare fit statistics and tail/step parameters, assigned energy, residual, and whether the point was manually overridden. `combined_peak` rows contain the expected and refitted energies, energy residual, FWHM in keV, percentage resolution, and number of contributing crystals. A companion C++ header contains exactly three coefficient arrays named `p0`, `p1`, and `p2`.
+
+Combined-peak FWHM is reported for the fitted Gaussian core as `2.354820045 × sigma`; percentage resolution is `100 × FWHM / expected energy`.
 
 The peak-shape implementation follows the public RadWare/GF3 model used for gamma-spectrum analysis: a Gaussian photopeak plus a low-energy exponential tail, a smoothed step, and polynomial background. See the [RadWare source repository](https://github.com/radforddc/rw05) and the [GammaSpecAnalysis RadWare fit documentation](https://nucleardata.berkeley.edu/nsd_software/doxy/html/d0/d67/_spectrum_analysis_8cpp.html).
 

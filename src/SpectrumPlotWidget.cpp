@@ -54,10 +54,13 @@ void SpectrumPlotWidget::SetPlot(std::string title, std::string xLabel,
             fullMaximum_ = std::max(fullMaximum_, x);
         }
     }
-    if (!std::isfinite(fullMinimum_) || !std::isfinite(fullMaximum_) ||
-        fullMaximum_ <= fullMinimum_) {
+    if (!std::isfinite(fullMinimum_) || !std::isfinite(fullMaximum_)) {
         fullMinimum_ = 0.0;
         fullMaximum_ = 1.0;
+    } else if (fullMaximum_ <= fullMinimum_) {
+        const double halfWidth = std::max(1.0, 0.05 * std::abs(fullMinimum_));
+        fullMinimum_ -= halfWidth;
+        fullMaximum_ += halfWidth;
     }
     const double padding = std::max(0.0, options.horizontalPaddingFraction) *
                            (fullMaximum_ - fullMinimum_);

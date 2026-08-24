@@ -69,4 +69,16 @@ struct CalibrationResult {
     std::vector<CalibrationPoint> points;
 };
 
+struct CombinedPeakQuality {
+    bool success = false;
+    std::string status;
+    std::string datasetId;
+    double expectedEnergy = 0.0;
+    double fittedEnergy = 0.0;
+    double residualKeV = 0.0;
+    double fwhmKeV = 0.0;
+    double resolutionPercent = 0.0;
+    PeakFitResult peakFit;
+};
+
 } // namespace hpge

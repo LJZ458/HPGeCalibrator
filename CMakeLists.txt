@@ -25,7 +25,9 @@ endif()
 find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets)
 
 add_library(hpge_core
+    src/CalibrationExporter.cpp
     src/CalibrationEngine.cpp
+    src/CombinedSpectrumAnalyzer.cpp
     src/RootDataRepository.cpp
 )
 target_include_directories(hpge_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -79,6 +81,14 @@ if(BUILD_TESTING)
         add_test(NAME repository-${test_case}
                  COMMAND hpge-repository-tests ${test_case})
     endforeach()
+
+    add_executable(hpge-combined-spectrum-tests tests/test_combined_spectrum.cpp)
+    target_link_libraries(hpge-combined-spectrum-tests PRIVATE hpge_core)
+    add_test(NAME calibration-combined-spectrum-quality COMMAND hpge-combined-spectrum-tests)
+
+    add_executable(hpge-export-tests tests/test_export.cpp)
+    target_link_libraries(hpge-export-tests PRIVATE hpge_core)
+    add_test(NAME calibration-cpp-coefficient-export COMMAND hpge-export-tests)
 
     add_test(NAME sample-generator
              COMMAND hpge-generate-sample ${CMAKE_CURRENT_BINARY_DIR}/hpge_test_sample.root)

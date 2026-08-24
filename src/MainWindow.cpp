@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "CalibrationExporter.h"
 #include "SpectrumPlotWidget.h"
 
 #include <QApplication>
@@ -25,6 +26,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <filesystem>
 #include <iomanip>
 #include <sstream>
 
@@ -37,6 +39,31 @@ std::string FormatNumber(double value, int precision = 5) {
     std::ostringstream out;
     out << std::fixed << std::setprecision(precision) << value;
     return out.str();
+}
+
+std::string FormatPrecise(double value) {
+    std::ostringstream out;
+    out << std::setprecision(12) << value;
+    return out.str();
+}
+
+std::string CsvField(const std::string& value) {
+    if (value.find_first_of(",\"\r\n") == std::string::npos) return value;
+    std::string escaped = "\"";
+    for (char character : value) {
+        if (character == '"') escaped += '"';
+        escaped += character;
+    }
+    escaped += '"';
+    return escaped;
+}
+
+void WriteCsvRow(std::ostream& output, const std::vector<std::string>& fields) {
+    for (std::size_t index = 0; index < fields.size(); ++index) {
+        if (index != 0) output << ',';
+        output << CsvField(fields[index]);
+    }
+    output << '\n';
 }
 
 QLabel* Hint(const QString& text) {
@@ -345,6 +372,19 @@ QWidget* MainWindow::BuildCalibrationTab() {
     connect(showFit, &QPushButton::clicked, this, [this] { ShowSelectedCalibration(); });
     layout->addWidget(Row({showSpectrum, showFit}));
 
+    auto* combined = new QGroupBox("Combined calibrated spectrum quality");
+    auto* combinedLayout = new QVBoxLayout(combined);
+    combinedLayout->addWidget(Hint("After calibration, sum all successful crystals in energy space and refit each assigned line."));
+    combinedHistogramCombo_ = new QComboBox;
+    combinedQualityList_ = new QListWidget;
+    combinedQualityList_->setMinimumHeight(105);
+    auto* showCombined = new QPushButton("Show combined spectrum + energy residuals");
+    connect(showCombined, &QPushButton::clicked, this, [this] { ShowCombinedSpectrum(); });
+    combinedLayout->addWidget(combinedHistogramCombo_);
+    combinedLayout->addWidget(combinedQualityList_);
+    combinedLayout->addWidget(showCombined);
+    layout->addWidget(combined);
+
     manualCorrectionGroup_ = new QGroupBox("Manual correction — select one calibration result");
     auto* manualLayout = new QVBoxLayout(manualCorrectionGroup_);
     manualLayout->addWidget(Hint("Corrections below apply only to the single crystal selected in Calibration results."));
@@ -377,7 +417,7 @@ QWidget* MainWindow::BuildCalibrationTab() {
     manualLayout->addWidget(Row({remove, refit}));
     manualCorrectionGroup_->setEnabled(false);
     layout->addWidget(manualCorrectionGroup_);
-    auto* exportButton = new QPushButton("Export results and residuals to CSV...");
+    auto* exportButton = new QPushButton("Export CSV + three C++ coefficient lists...");
     connect(exportButton, &QPushButton::clicked, this, [this] { ExportCsv(); });
     layout->addWidget(exportButton);
     layout->addStretch();
@@ -402,6 +442,9 @@ void MainWindow::ConnectActions() {
         const auto* descriptor = DescriptorForCombo(manualHistogramCombo_);
         const int crystal = CurrentResultCrystal();
         if (descriptor && crystal >= 0) ShowCrystalSpectrum(crystal, *descriptor);
+    });
+    connect(combinedHistogramCombo_, &QComboBox::currentIndexChanged, this, [this] {
+        if (!updatingWidgets_) RefreshCombinedQualityList();
     });
     connect(resultList_, &QListWidget::currentRowChanged, this, [this] {
         if (updatingWidgets_) return;
@@ -858,6 +901,7 @@ void MainWindow::RunCalibration() {
         QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
     }
     RefreshResults();
+    EvaluateCombinedSpectra();
     int ok = 0, review = 0, failed = 0;
     for (const auto& [crystal, result] : results_) {
         (void)crystal;
@@ -867,6 +911,134 @@ void MainWindow::RunCalibration() {
     }
     SetStatus("Calibration complete: " + std::to_string(ok) + " OK, " +
               std::to_string(review) + " review, " + std::to_string(failed) + " failed.");
+}
+
+void MainWindow::EvaluateCombinedSpectra() {
+    combinedAnalyses_.clear();
+    updatingWidgets_ = true;
+    combinedHistogramCombo_->clear();
+    combinedQualityList_->clear();
+    updatingWidgets_ = false;
+
+    for (int descriptorIndex : SelectedDescriptorIndices()) {
+        const auto& descriptor = descriptors_[descriptorIndex];
+        std::vector<std::shared_ptr<TH1D>> ownedSpectra;
+        std::vector<CalibratedSpectrumInput> inputs;
+        for (const auto& [crystal, result] : results_) {
+            if (!result.success) continue;
+            std::string error;
+            auto spectrum = repository_.ProjectCrystal(descriptor, crystal, Orientation(), error);
+            if (!spectrum) continue;
+            inputs.push_back({spectrum.get(), result.p0, result.p1, result.p2});
+            ownedSpectra.push_back(std::move(spectrum));
+        }
+        std::string error;
+        auto combined = CombinedSpectrumAnalyzer::Combine(descriptor.id, inputs, error);
+        if (!combined) continue;
+
+        CombinedDatasetAnalysis analysis;
+        analysis.datasetId = descriptor.id;
+        analysis.spectrum = std::move(combined);
+        analysis.crystalCount = static_cast<int>(inputs.size());
+        std::vector<const ReferencePeak*> references;
+        for (const auto& reference : referencePeaks_) {
+            if (reference.datasetId == descriptor.id) references.push_back(&reference);
+        }
+        std::sort(references.begin(), references.end(), [](const ReferencePeak* first,
+                                                            const ReferencePeak* second) {
+            return first->energy < second->energy;
+        });
+        for (const ReferencePeak* reference : references) {
+            double halfWindow = 10.0;
+            const auto referenceResult = results_.find(ReferenceCrystal());
+            if (referenceResult != results_.end() && referenceResult->second.success) {
+                const auto& calibration = referenceResult->second;
+                const auto energyAt = [&](double charge) {
+                    return calibration.p0 + calibration.p1 * charge +
+                           calibration.p2 * charge * charge;
+                };
+                halfWindow = 1.25 * std::max(
+                    std::abs(energyAt(reference->peakFit.rangeLow) - reference->energy),
+                    std::abs(energyAt(reference->peakFit.rangeHigh) - reference->energy));
+                halfWindow = std::clamp(halfWindow, 4.0, 100.0);
+            }
+            analysis.peaks.push_back(CombinedSpectrumAnalyzer::EvaluatePeak(
+                *analysis.spectrum, descriptor.id, reference->energy, halfWindow));
+        }
+        combinedAnalyses_[descriptor.id] = std::move(analysis);
+        combinedHistogramCombo_->addItem(Text(descriptor.displayName), Text(descriptor.id));
+    }
+    if (combinedHistogramCombo_->count() > 0) combinedHistogramCombo_->setCurrentIndex(0);
+    RefreshCombinedQualityList();
+}
+
+void MainWindow::RefreshCombinedQualityList() {
+    combinedQualityList_->clear();
+    const std::string datasetId = combinedHistogramCombo_->currentData().toString().toStdString();
+    const auto found = combinedAnalyses_.find(datasetId);
+    if (found == combinedAnalyses_.end()) return;
+    for (const auto& peak : found->second.peaks) {
+        if (!peak.success) {
+            combinedQualityList_->addItem(Text("FAIL | " + FormatNumber(peak.expectedEnergy, 3) +
+                " keV | " + peak.status));
+            continue;
+        }
+        combinedQualityList_->addItem(Text(
+            FormatNumber(peak.expectedEnergy, 3) + " keV | centroid " +
+            FormatNumber(peak.fittedEnergy, 3) + " | residual " +
+            FormatNumber(peak.residualKeV, 3) + " keV | FWHM " +
+            FormatNumber(peak.fwhmKeV, 3) + " keV | resolution " +
+            FormatNumber(peak.resolutionPercent, 3) + "%"));
+    }
+}
+
+void MainWindow::ShowCombinedSpectrum() {
+    const std::string datasetId = combinedHistogramCombo_->currentData().toString().toStdString();
+    const auto found = combinedAnalyses_.find(datasetId);
+    if (found == combinedAnalyses_.end() || !found->second.spectrum) {
+        SetStatus("Run calibration before viewing the combined spectrum.");
+        return;
+    }
+    const auto descriptor = std::find_if(descriptors_.begin(), descriptors_.end(),
+        [&](const HistogramDescriptor& item) { return item.id == datasetId; });
+    const std::string datasetName = descriptor == descriptors_.end()
+        ? datasetId : descriptor->displayName;
+    std::vector<PlotSeries> spectrumSeries{
+        HistogramSeries(*found->second.spectrum, QColor("#2563eb"), "Combined spectrum")};
+    std::vector<PlotMarker> markers;
+    PlotSeries residuals;
+    residuals.name = "Combined centroid residual";
+    residuals.color = QColor("#16a34a");
+    residuals.points = true;
+    int successful = 0;
+    for (const auto& peak : found->second.peaks) {
+        if (!peak.success) continue;
+        ++successful;
+        spectrumSeries.push_back(FitSeries(
+            peak.peakFit, FormatNumber(peak.expectedEnergy, 1) + " keV / FWHM " +
+                          FormatNumber(peak.fwhmKeV, 2)));
+        markers.push_back({peak.fittedEnergy,
+            FormatNumber(peak.expectedEnergy, 1) + " keV", QColor("#dc2626"), false});
+        residuals.x.push_back(peak.expectedEnergy);
+        residuals.y.push_back(peak.residualKeV);
+    }
+    displayedSpectrum_.reset();
+    displayedDatasetId_.clear();
+    displayedCrystal_ = -1;
+    pendingRangeStart_.reset();
+    SetSecondaryPlotVisible(true);
+    primaryPlot_->SetPlot("Combined calibrated spectrum — " + datasetName,
+                          "Energy (keV)", "Counts", std::move(spectrumSeries),
+                          std::move(markers));
+    if (!residuals.x.empty()) {
+        secondaryPlot_->SetPlot("Combined-spectrum residuals versus energy",
+                                "Peak energy (keV)", "Fitted - expected (keV)",
+                                {std::move(residuals)}, {}, {false, 0.15});
+    } else {
+        secondaryPlot_->Clear("No combined peaks were fitted");
+    }
+    SetStatus("Combined " + std::to_string(found->second.crystalCount) +
+              " calibrated crystals and refitted " + std::to_string(successful) + " peak(s).");
 }
 
 void MainWindow::ShowSpectrumAlignment() {
@@ -932,6 +1104,7 @@ void MainWindow::RefitSelectedCrystal() {
     }
     results_[crystal] = CalibrateCrystal(crystal);
     RefreshResults();
+    EvaluateCombinedSpectra();
     for (int row = 0; row < resultList_->count(); ++row) {
         if (resultList_->item(row)->data(Qt::UserRole).toInt() == crystal) {
             resultList_->setCurrentRow(row);
@@ -987,7 +1160,7 @@ void MainWindow::ShowSelectedCalibration() {
     for (const auto& point : result.points) {
         points.x.push_back(point.charge);
         points.y.push_back(point.energy);
-        residuals.x.push_back(point.charge);
+        residuals.x.push_back(point.energy);
         residuals.y.push_back(point.residual);
     }
     const auto [minimum, maximum] = std::minmax_element(points.x.begin(), points.x.end());
@@ -1011,7 +1184,7 @@ void MainWindow::ShowSelectedCalibration() {
     primaryPlot_->SetPlot("Crystal " + std::to_string(crystal) + " calibration",
                           "Charge", "Energy (keV)", {std::move(fit), std::move(points)});
     secondaryPlot_->SetPlot("Residuals — RMS " + FormatNumber(result.residualRms, 3) + " keV",
-                            "Charge", "Energy - fit (keV)", {std::move(residuals)}, {},
+                            "Peak energy (keV)", "Energy - fit (keV)", {std::move(residuals)}, {},
                             {false, 0.15});
     SetStatus("Crystal " + std::to_string(crystal) + ": " + result.status);
 }
@@ -1029,26 +1202,83 @@ void MainWindow::ExportCsv() {
         SetStatus("Could not write CSV file.");
         return;
     }
-    output << "record,crystal,status,needs_review,p0,p1,p2,chi2,ndf,residual_rms_keV,"
-              "dataset,charge,energy_keV,residual_keV,manual,charge_error,range_low,range_high,"
-              "peak_sigma,peak_chi2,peak_ndf,tail_fraction,beta,step_fraction\n";
-    output << std::setprecision(12);
+    WriteCsvRow(output, {"record", "crystal", "status", "needs_review", "p0", "p1", "p2",
+        "chi2", "ndf", "residual_rms_keV", "dataset", "charge", "energy_keV",
+        "residual_keV", "manual", "charge_error", "range_low", "range_high",
+        "peak_sigma", "peak_chi2", "peak_ndf", "tail_fraction", "beta", "step_fraction",
+        "fwhm_keV", "resolution_percent", "combined_crystals", "combined_fitted_energy_keV"});
     for (const auto& [crystal, result] : results_) {
-        output << "fit," << crystal << ",\"" << result.status << "\"," << result.needsReview
-               << ',' << result.p0 << ',' << result.p1 << ',' << result.p2 << ','
-               << result.chi2 << ',' << result.ndf << ',' << result.residualRms << ",,,,,,,,,,,,,,\n";
+        std::vector<std::string> fitRow(28);
+        fitRow[0] = "fit";
+        fitRow[1] = std::to_string(crystal);
+        fitRow[2] = result.status;
+        fitRow[3] = result.needsReview ? "1" : "0";
+        fitRow[4] = FormatPrecise(result.p0);
+        fitRow[5] = FormatPrecise(result.p1);
+        fitRow[6] = FormatPrecise(result.p2);
+        fitRow[7] = FormatPrecise(result.chi2);
+        fitRow[8] = std::to_string(result.ndf);
+        fitRow[9] = FormatPrecise(result.residualRms);
+        WriteCsvRow(output, fitRow);
         for (const auto& point : result.points) {
-            output << "point," << crystal << ",,," << result.p0 << ',' << result.p1 << ','
-                   << result.p2 << ",,,,\"" << point.datasetId << "\"," << point.charge << ','
-                   << point.energy << ',' << point.residual << ',' << point.manual << ','
-                   << point.chargeError << ',' << point.peakFit.rangeLow << ','
-                   << point.peakFit.rangeHigh << ',' << point.peakFit.sigma << ','
-                   << point.peakFit.chi2 << ',' << point.peakFit.ndf << ','
-                   << point.peakFit.tailFraction << ',' << point.peakFit.beta << ','
-                   << point.peakFit.stepFraction << '\n';
+            std::vector<std::string> pointRow(28);
+            pointRow[0] = "point";
+            pointRow[1] = std::to_string(crystal);
+            pointRow[4] = FormatPrecise(result.p0);
+            pointRow[5] = FormatPrecise(result.p1);
+            pointRow[6] = FormatPrecise(result.p2);
+            pointRow[10] = point.datasetId;
+            pointRow[11] = FormatPrecise(point.charge);
+            pointRow[12] = FormatPrecise(point.energy);
+            pointRow[13] = FormatPrecise(point.residual);
+            pointRow[14] = point.manual ? "1" : "0";
+            pointRow[15] = FormatPrecise(point.chargeError);
+            pointRow[16] = FormatPrecise(point.peakFit.rangeLow);
+            pointRow[17] = FormatPrecise(point.peakFit.rangeHigh);
+            pointRow[18] = FormatPrecise(point.peakFit.sigma);
+            pointRow[19] = FormatPrecise(point.peakFit.chi2);
+            pointRow[20] = std::to_string(point.peakFit.ndf);
+            pointRow[21] = FormatPrecise(point.peakFit.tailFraction);
+            pointRow[22] = FormatPrecise(point.peakFit.beta);
+            pointRow[23] = FormatPrecise(point.peakFit.stepFraction);
+            WriteCsvRow(output, pointRow);
         }
     }
-    SetStatus("Exported coefficients and per-peak residuals to " + path.toStdString());
+    for (const auto& [datasetId, analysis] : combinedAnalyses_) {
+        for (const auto& peak : analysis.peaks) {
+            std::vector<std::string> row(28);
+            row[0] = "combined_peak";
+            row[2] = peak.status;
+            row[10] = datasetId;
+            row[12] = FormatPrecise(peak.expectedEnergy);
+            if (peak.success) {
+                row[13] = FormatPrecise(peak.residualKeV);
+                row[16] = FormatPrecise(peak.peakFit.rangeLow);
+                row[17] = FormatPrecise(peak.peakFit.rangeHigh);
+                row[18] = FormatPrecise(peak.peakFit.sigma);
+                row[19] = FormatPrecise(peak.peakFit.chi2);
+                row[20] = std::to_string(peak.peakFit.ndf);
+                row[21] = FormatPrecise(peak.peakFit.tailFraction);
+                row[22] = FormatPrecise(peak.peakFit.beta);
+                row[23] = FormatPrecise(peak.peakFit.stepFraction);
+                row[24] = FormatPrecise(peak.fwhmKeV);
+                row[25] = FormatPrecise(peak.resolutionPercent);
+                row[27] = FormatPrecise(peak.fittedEnergy);
+            }
+            row[26] = std::to_string(analysis.crystalCount);
+            WriteCsvRow(output, row);
+        }
+    }
+    output.close();
+    const std::filesystem::path csvPath(path.toStdString());
+    const std::filesystem::path cppPath = csvPath.parent_path() /
+        (csvPath.stem().string() + "_coefficients.hpp");
+    if (!CalibrationExporter::WriteCppCoefficientLists(cppPath.string(), results_)) {
+        SetStatus("Exported CSV, but could not write C++ coefficient lists to " + cppPath.string());
+        return;
+    }
+    SetStatus("Exported CSV to " + path.toStdString() + " and p0/p1/p2 C++ lists to " +
+              cppPath.string());
 }
 
 void MainWindow::SetStatus(const std::string& text) {

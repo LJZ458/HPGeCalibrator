@@ -2,6 +2,7 @@
 
 #include "CalibrationEngine.h"
 #include "CalibrationTypes.h"
+#include "CombinedSpectrumAnalyzer.h"
 #include "RootDataRepository.h"
 
 #include <QMainWindow>
@@ -46,6 +47,12 @@ private:
         std::string label;
         PeakFitResult peakFit;
     };
+    struct CombinedDatasetAnalysis {
+        std::string datasetId;
+        std::shared_ptr<TH1D> spectrum;
+        std::vector<CombinedPeakQuality> peaks;
+        int crystalCount = 0;
+    };
 
     void BuildInterface();
     QWidget* BuildDataTab();
@@ -77,6 +84,9 @@ private:
     std::vector<CalibrationPoint> BuildPointsForCrystal(int crystal);
     CalibrationResult CalibrateCrystal(int crystal);
     void RunCalibration();
+    void EvaluateCombinedSpectra();
+    void RefreshCombinedQualityList();
+    void ShowCombinedSpectrum();
     void ShowSpectrumAlignment();
     void RefitSelectedCrystal();
     void RefreshResults();
@@ -95,6 +105,7 @@ private:
     std::vector<ReferencePeak> referencePeaks_;
     std::vector<ManualPeak> manualPeaks_;
     std::map<int, CalibrationResult> results_;
+    std::map<std::string, CombinedDatasetAnalysis> combinedAnalyses_;
     std::shared_ptr<TH1D> displayedSpectrum_;
     std::string displayedDatasetId_;
     int displayedCrystal_ = -1;
@@ -117,6 +128,8 @@ private:
     QComboBox* alignmentHistogramCombo_ = nullptr;
     QSpinBox* alignmentCrystalEntry_ = nullptr;
     QListWidget* resultList_ = nullptr;
+    QComboBox* combinedHistogramCombo_ = nullptr;
+    QListWidget* combinedQualityList_ = nullptr;
     QComboBox* manualHistogramCombo_ = nullptr;
     QComboBox* manualSourceCombo_ = nullptr;
     QListWidget* manualEnergyList_ = nullptr;
