@@ -27,6 +27,7 @@ class TH1D;
 namespace hpge {
 
 class SpectrumPlotWidget;
+class MainWindowTestAccess;
 
 class MainWindow final : public QMainWindow {
 public:
@@ -35,6 +36,7 @@ public:
     bool OpenRootFiles(const std::vector<std::string>& files);
 
 private:
+    friend class MainWindowTestAccess;
     struct EnergyLine {
         double energy = 0.0;
         std::string label;
@@ -77,7 +79,9 @@ private:
     void ShowReferenceSpectrum();
     void ShowCrystalSpectrum(int crystal, const HistogramDescriptor& descriptor);
     void RedrawDisplayedSpectrum(bool preserveView = true);
+    void RefreshResultSpectrumChoices();
     void ShowSelectedResultSpectrum();
+    void ShowAllResultSpectra();
     void UpdateManualCorrectionForSelection();
     void HandleRangeClick(double charge);
     void AddReferencePeak(const PeakFitResult& fit);
@@ -134,6 +138,7 @@ private:
     QComboBox* alignmentHistogramCombo_ = nullptr;
     QSpinBox* alignmentCrystalEntry_ = nullptr;
     QListWidget* resultList_ = nullptr;
+    QComboBox* resultSpectrumCombo_ = nullptr;
     QComboBox* combinedHistogramCombo_ = nullptr;
     QListWidget* combinedQualityList_ = nullptr;
     QComboBox* manualHistogramCombo_ = nullptr;

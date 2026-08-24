@@ -126,6 +126,12 @@ if(BUILD_TESTING)
     set_tests_properties(qt-alignment-multiple-histogram-preview PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         DEPENDS sample-generator)
+    add_test(NAME qt-result-multiple-source-spectrum-review
+             COMMAND hpge-gui-alignment-tests
+                     ${CMAKE_CURRENT_BINARY_DIR}/hpge_test_sample.root result-review)
+    set_tests_properties(qt-result-multiple-source-spectrum-review PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        DEPENDS sample-generator)
 endif()
 
 install(TARGETS hpge-calibrator hpge-generate-sample RUNTIME DESTINATION bin)

@@ -25,6 +25,7 @@
 #include <TH1D.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <filesystem>
@@ -386,11 +387,19 @@ QWidget* MainWindow::BuildCalibrationTab() {
     resultList_ = new QListWidget;
     resultList_->setMinimumHeight(135);
     layout->addWidget(resultList_);
-    auto* showSpectrum = new QPushButton("Show spectrum");
+    layout->addWidget(new QLabel("Fitted source spectra used by selected result"));
+    resultSpectrumCombo_ = new QComboBox;
+    resultSpectrumCombo_->setObjectName("resultSpectrumCombo");
+    layout->addWidget(resultSpectrumCombo_);
+    auto* showSpectrum = new QPushButton("Show selected source");
+    showSpectrum->setObjectName("showResultSpectrumButton");
+    auto* showAllSpectra = new QPushButton("Show all fitted sources");
+    showAllSpectra->setObjectName("showAllResultSpectraButton");
     auto* showFit = new QPushButton("Fit + residuals");
     connect(showSpectrum, &QPushButton::clicked, this, [this] { ShowSelectedResultSpectrum(); });
+    connect(showAllSpectra, &QPushButton::clicked, this, [this] { ShowAllResultSpectra(); });
     connect(showFit, &QPushButton::clicked, this, [this] { ShowSelectedCalibration(); });
-    layout->addWidget(Row({showSpectrum, showFit}));
+    layout->addWidget(Row({showSpectrum, showAllSpectra, showFit}));
 
     auto* combined = new QGroupBox("Combined calibrated spectrum quality");
     auto* combinedLayout = new QVBoxLayout(combined);
@@ -471,10 +480,16 @@ void MainWindow::ConnectActions() {
             ShowSpectrumAlignment();
         }
     });
+    connect(resultSpectrumCombo_, &QComboBox::currentIndexChanged, this, [this] {
+        if (!updatingWidgets_ && resultSpectrumCombo_->currentIndex() >= 0) {
+            ShowSelectedResultSpectrum();
+        }
+    });
     connect(resultList_, &QListWidget::currentRowChanged, this, [this] {
         if (updatingWidgets_) return;
         UpdateManualCorrectionForSelection();
-        ShowSelectedResultSpectrum();
+        RefreshResultSpectrumChoices();
+        ShowAllResultSpectra();
     });
     UpdateInteractionMode();
 }
@@ -665,6 +680,33 @@ void MainWindow::ShowCrystalSpectrum(int crystal, const HistogramDescriptor& des
               ". Select range uses two boundary clicks; Zoom / pan uses wheel, drag, or double-click reset.");
 }
 
+void MainWindow::RefreshResultSpectrumChoices() {
+    const int crystal = CurrentResultCrystal();
+    const auto result = results_.find(crystal);
+    const int previousDescriptor = resultSpectrumCombo_->currentData().toInt();
+    const bool wasUpdating = updatingWidgets_;
+    updatingWidgets_ = true;
+    resultSpectrumCombo_->clear();
+    if (crystal >= 0 && result != results_.end()) {
+        for (std::size_t index = 0; index < descriptors_.size(); ++index) {
+            const auto& descriptor = descriptors_[index];
+            const bool used = std::any_of(
+                result->second.points.begin(), result->second.points.end(),
+                [&](const CalibrationPoint& point) {
+                    return point.datasetId == descriptor.id && point.peakFit.success;
+                });
+            if (used) {
+                resultSpectrumCombo_->addItem(Text(descriptor.displayName),
+                                              static_cast<int>(index));
+            }
+        }
+    }
+    const int previousRow = resultSpectrumCombo_->findData(previousDescriptor);
+    if (previousRow >= 0) resultSpectrumCombo_->setCurrentIndex(previousRow);
+    else if (resultSpectrumCombo_->count() > 0) resultSpectrumCombo_->setCurrentIndex(0);
+    updatingWidgets_ = wasUpdating;
+}
+
 void MainWindow::ShowSelectedResultSpectrum() {
     const int crystal = CurrentResultCrystal();
     const auto result = results_.find(crystal);
@@ -673,37 +715,97 @@ void MainWindow::ShowSelectedResultSpectrum() {
         return;
     }
 
-    const HistogramDescriptor* descriptor = DescriptorForCombo(manualHistogramCombo_);
+    if (resultSpectrumCombo_->count() == 0) RefreshResultSpectrumChoices();
+    const HistogramDescriptor* descriptor = DescriptorForCombo(resultSpectrumCombo_);
     const auto fitCountFor = [&](const std::string& datasetId) {
         return static_cast<int>(std::count_if(result->second.points.begin(), result->second.points.end(),
             [&](const CalibrationPoint& point) {
                 return point.datasetId == datasetId && point.peakFit.success;
             }));
     };
-
-    // If the currently chosen source has no stored fit for this result, move to
-    // the first source that does. This makes Show spectrum reliably restore the
-    // red fitted peaks instead of opening an unrelated, overlay-free source.
-    if ((!descriptor || fitCountFor(descriptor->id) == 0) && !result->second.points.empty()) {
-        const std::string& datasetId = result->second.points.front().datasetId;
-        const auto found = std::find_if(descriptors_.begin(), descriptors_.end(),
-            [&](const HistogramDescriptor& item) { return item.id == datasetId; });
-        if (found != descriptors_.end()) {
-            const int index = static_cast<int>(std::distance(descriptors_.begin(), found));
-            updatingWidgets_ = true;
-            manualHistogramCombo_->setCurrentIndex(index);
-            updatingWidgets_ = false;
-            descriptor = &descriptors_[index];
-        }
-    }
     if (!descriptor) {
-        SetStatus("No source histogram is available for the selected result.");
+        SetStatus("No fitted source spectrum is available for the selected result.");
         return;
     }
+    const int descriptorIndex = static_cast<int>(descriptor - descriptors_.data());
+    const bool wasUpdating = updatingWidgets_;
+    updatingWidgets_ = true;
+    manualHistogramCombo_->setCurrentIndex(descriptorIndex);
+    updatingWidgets_ = wasUpdating;
     ShowCrystalSpectrum(crystal, *descriptor);
     const int fittedPeaks = fitCountFor(descriptor->id);
-    SetStatus("Showing selected result Crystal " + std::to_string(crystal) + " with " +
-              std::to_string(fittedPeaks) + " stored fitted peak(s) in red.");
+    SetStatus("Showing " + descriptor->displayName + " for Crystal " +
+              std::to_string(crystal) + " with " + std::to_string(fittedPeaks) +
+              " stored fitted peak(s) in red (source " +
+              std::to_string(resultSpectrumCombo_->currentIndex() + 1) + "/" +
+              std::to_string(resultSpectrumCombo_->count()) + ").");
+}
+
+void MainWindow::ShowAllResultSpectra() {
+    const int crystal = CurrentResultCrystal();
+    const auto result = results_.find(crystal);
+    if (crystal < 0 || result == results_.end()) {
+        SetStatus("Select one calibration result first.");
+        return;
+    }
+    if (resultSpectrumCombo_->count() == 0) RefreshResultSpectrumChoices();
+    if (resultSpectrumCombo_->count() == 0) {
+        SetStatus("The selected result has no stored fitted source spectra.");
+        return;
+    }
+
+    const std::array<QColor, 8> colors{
+        QColor("#2563eb"), QColor("#16a34a"), QColor("#7c3aed"), QColor("#d97706"),
+        QColor("#0891b2"), QColor("#db2777"), QColor("#4f46e5"), QColor("#65a30d")};
+    std::vector<PlotSeries> series;
+    std::vector<PlotMarker> markers;
+    int sourceCount = 0;
+    int fitCount = 0;
+    for (int row = 0; row < resultSpectrumCombo_->count(); ++row) {
+        const int descriptorIndex = resultSpectrumCombo_->itemData(row).toInt();
+        if (descriptorIndex < 0 || descriptorIndex >= static_cast<int>(descriptors_.size())) continue;
+        const auto& descriptor = descriptors_[descriptorIndex];
+        std::string error;
+        auto spectrum = repository_.ProjectCrystal(descriptor, crystal, Orientation(), error);
+        if (!spectrum) continue;
+        const double maximum = std::max(spectrum->GetMaximum(), 1.0);
+        const double offset = 1.15 * sourceCount;
+        PlotSeries spectrumSeries = HistogramSeries(
+            *spectrum, colors[static_cast<std::size_t>(sourceCount) % colors.size()],
+            descriptor.displayName + "  (+" + FormatNumber(offset, 2) + ")");
+        for (double& value : spectrumSeries.y) value = value / maximum + offset;
+        series.push_back(std::move(spectrumSeries));
+        for (const auto& point : result->second.points) {
+            if (point.datasetId != descriptor.id || !point.peakFit.success) continue;
+            PlotSeries fitted = FitSeries(
+                point.peakFit, FormatNumber(point.energy, 1) + " keV (" +
+                                   descriptor.objectPath + ")", point.manual);
+            for (double& value : fitted.y) value = value / maximum + offset;
+            series.push_back(std::move(fitted));
+            markers.push_back({point.peakFit.centroid,
+                               FormatNumber(point.energy, 1) + " keV",
+                               QColor("#dc2626"), point.manual});
+            ++fitCount;
+        }
+        ++sourceCount;
+    }
+    if (sourceCount == 0) {
+        primaryPlot_->Clear("No fitted source spectra could be projected for this result.");
+        SetStatus("No fitted source spectra could be projected for Crystal " +
+                  std::to_string(crystal) + ".");
+        return;
+    }
+    displayedSpectrum_.reset();
+    displayedDatasetId_.clear();
+    displayedCrystal_ = -1;
+    pendingRangeStart_.reset();
+    SetSecondaryPlotVisible(false);
+    primaryPlot_->SetPlot("All fitted source spectra — Crystal " + std::to_string(crystal),
+                          "Charge", "Normalized counts + source offset",
+                          std::move(series), std::move(markers));
+    SetStatus("Showing all " + std::to_string(sourceCount) +
+              " fitted source spectra used by Crystal " + std::to_string(crystal) +
+              " with " + std::to_string(fitCount) + " fitted peak curve(s) in red.");
 }
 
 void MainWindow::UpdateManualCorrectionForSelection() {
@@ -750,7 +852,14 @@ void MainWindow::RedrawDisplayedSpectrum(bool preserveView) {
     if (pendingRangeStart_) {
         markers.push_back({*pendingRangeStart_, "first fit limit", QColor("#d97706"), true});
     }
-    primaryPlot_->SetPlot("Crystal " + std::to_string(displayedCrystal_) + " spectrum",
+    const auto descriptor = std::find_if(
+        descriptors_.begin(), descriptors_.end(), [&](const HistogramDescriptor& item) {
+            return item.id == displayedDatasetId_;
+        });
+    const std::string datasetName = descriptor == descriptors_.end()
+        ? displayedDatasetId_ : descriptor->displayName;
+    primaryPlot_->SetPlot("Crystal " + std::to_string(displayedCrystal_) +
+                          " spectrum — " + datasetName,
                           "Charge", "Counts", std::move(series), std::move(markers),
                           {preserveView, 0.0});
 }
@@ -1196,6 +1305,7 @@ void MainWindow::RefreshResults() {
     resultList_->setCurrentRow(selectedRow);
     updatingWidgets_ = false;
     UpdateManualCorrectionForSelection();
+    RefreshResultSpectrumChoices();
 }
 
 void MainWindow::ShowSelectedCalibration() {
