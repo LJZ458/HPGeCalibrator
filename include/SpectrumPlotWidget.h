@@ -53,6 +53,8 @@ public:
     void PreviousView();
     std::pair<double, double> VisibleXRange() const;
     std::pair<double, double> FullXRange() const;
+    const std::string& Title() const { return title_; }
+    const std::vector<PlotSeries>& Series() const { return series_; }
     void SetRangeSelectedCallback(std::function<void(double)> callback);
 
 protected:

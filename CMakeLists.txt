@@ -113,6 +113,19 @@ if(BUILD_TESTING)
     set_tests_properties(qt-gui-root-file-workflow PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         DEPENDS sample-generator)
+
+    add_executable(hpge-gui-alignment-tests
+        tests/test_gui_alignment.cpp
+        src/MainWindow.cpp
+        src/SpectrumPlotWidget.cpp
+    )
+    target_include_directories(hpge-gui-alignment-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(hpge-gui-alignment-tests PRIVATE hpge_core Qt6::Widgets)
+    add_test(NAME qt-alignment-multiple-histogram-preview
+             COMMAND hpge-gui-alignment-tests ${CMAKE_CURRENT_BINARY_DIR}/hpge_test_sample.root)
+    set_tests_properties(qt-alignment-multiple-histogram-preview PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        DEPENDS sample-generator)
 endif()
 
 install(TARGETS hpge-calibrator hpge-generate-sample RUNTIME DESTINATION bin)

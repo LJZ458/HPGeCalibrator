@@ -187,6 +187,7 @@ void MainWindow::BuildInterface() {
 
     auto* plotSplitter = new QSplitter(Qt::Vertical);
     primaryPlot_ = new SpectrumPlotWidget;
+    primaryPlot_->setObjectName("primaryPlot");
     secondaryPlotContainer_ = new QWidget;
     auto* secondaryLayout = new QVBoxLayout(secondaryPlotContainer_);
     secondaryLayout->setContentsMargins(0, 0, 0, 0);
@@ -202,6 +203,7 @@ void MainWindow::BuildInterface() {
     setCentralWidget(central);
 
     statusLabel_ = new QLabel;
+    statusLabel_->setObjectName("statusLabel");
     statusLabel_->setWordWrap(true);
     statusBar()->addWidget(statusLabel_, 1);
     SetSecondaryPlotVisible(false);
@@ -360,14 +362,16 @@ QWidget* MainWindow::BuildCalibrationTab() {
     autoTuneAlignmentEntry_ = new QCheckBox("Auto-tune for each crystal spectrum");
     autoTuneAlignmentEntry_->setChecked(true);
     alignmentModelCombo_ = new QComboBox;
-    alignmentModelCombo_->addItem("Auto — affine or quadratic");
-    alignmentModelCombo_->addItem("Affine only");
-    alignmentModelCombo_->addItem("Quadratic");
+    alignmentModelCombo_->addItem("Auto — affine or 2nd order");
+    alignmentModelCombo_->addItem("Affine: a0 + a1 q");
+    alignmentModelCombo_->addItem("2nd-order polynomial: a0 + a1 q + a2 q²");
     alignmentHistogramCombo_ = new QComboBox;
+    alignmentHistogramCombo_->setObjectName("alignmentHistogramCombo");
     alignmentCrystalEntry_ = new QSpinBox;
     alignmentCrystalEntry_->setRange(0, 63);
     alignmentCrystalEntry_->setValue(1);
     auto* align = new QPushButton("Show aligned spectra");
+    align->setObjectName("showAlignmentButton");
     connect(align, &QPushButton::clicked, this, [this] { ShowSpectrumAlignment(); });
     alignmentLayout->addWidget(Row({new QLabel("Peak sensitivity"),
                                     alignmentSensitivityEntry_}));
@@ -461,6 +465,11 @@ void MainWindow::ConnectActions() {
     });
     connect(combinedHistogramCombo_, &QComboBox::currentIndexChanged, this, [this] {
         if (!updatingWidgets_) RefreshCombinedQualityList();
+    });
+    connect(alignmentHistogramCombo_, &QComboBox::currentIndexChanged, this, [this] {
+        if (!updatingWidgets_ && alignmentHistogramCombo_->currentIndex() >= 0) {
+            ShowSpectrumAlignment();
+        }
     });
     connect(resultList_, &QListWidget::currentRowChanged, this, [this] {
         if (updatingWidgets_) return;
@@ -1080,12 +1089,20 @@ void MainWindow::ShowSpectrumAlignment() {
         SetStatus("Choose a source histogram for the alignment preview.");
         return;
     }
+    const std::string previewName = descriptor->displayName;
+    displayedSpectrum_.reset();
+    displayedDatasetId_.clear();
+    displayedCrystal_ = -1;
+    pendingRangeStart_.reset();
+    SetSecondaryPlotVisible(false);
+    primaryPlot_->Clear("Loading alignment preview for " + previewName + "...");
     const int referenceCrystal = ReferenceCrystal();
     const int targetCrystal = alignmentCrystalEntry_->value();
     std::string error;
     auto reference = repository_.ProjectCrystal(*descriptor, referenceCrystal, Orientation(), error);
     auto target = repository_.ProjectCrystal(*descriptor, targetCrystal, Orientation(), error);
     if (!reference || !target) {
+        primaryPlot_->Clear("Alignment preview unavailable for " + previewName + ": " + error);
         SetStatus(error);
         return;
     }
@@ -1097,7 +1114,10 @@ void MainWindow::ShowSpectrumAlignment() {
     options.alignmentModel = AlignmentModel();
     const auto match = CalibrationEngine::AlignSpectrumPatterns(*reference, *target, options);
     if (!match.success || !(match.scale > 0.0) || !std::isfinite(match.scale) || !std::isfinite(match.offset)) {
-        SetStatus("Could not align this spectrum: not enough corresponding peaks were found.");
+        primaryPlot_->Clear("Alignment preview unavailable for " + previewName +
+                            ": not enough corresponding peaks were found.");
+        SetStatus("Could not align " + previewName +
+                  ": not enough corresponding peaks were found.");
         return;
     }
     const double referenceMaximum = std::max(reference->GetMaximum(), 1.0);
@@ -1118,17 +1138,14 @@ void MainWindow::ShowSpectrumAlignment() {
     for (std::size_t i = 0; i < match.matched.size(); ++i) {
         if (match.matched[i]) markers.push_back({match.referenceCharges[i], {}, QColor("#16a34a"), true});
     }
-    displayedSpectrum_.reset();
-    displayedDatasetId_.clear();
-    displayedCrystal_ = -1;
-    pendingRangeStart_.reset();
-    SetSecondaryPlotVisible(false);
-    primaryPlot_->SetPlot("Pre-calibration alignment", "Reference-spectrum charge", "Normalized counts",
+    primaryPlot_->SetPlot("Pre-calibration alignment — " + previewName,
+                          "Reference-spectrum charge", "Normalized counts",
                           {std::move(referenceSeries), std::move(targetSeries)}, std::move(markers));
     const int matched = static_cast<int>(std::count(match.matched.begin(), match.matched.end(), true));
-    SetStatus("Alignment preview: " + std::to_string(matched) + "/" +
+    SetStatus("Alignment preview for " + previewName + ": " +
+              std::to_string(matched) + "/" +
               std::to_string(match.referenceCharges.size()) + " pattern peaks; " +
-              (match.quadraticModel ? "quadratic" : "affine") +
+              (match.quadraticModel ? "2nd-order polynomial" : "affine") +
               " mapping; tuned sensitivity R/T " +
               FormatNumber(100.0 * match.referenceSensitivity, 0) + "%/" +
               FormatNumber(100.0 * match.targetSensitivity, 0) + "%; target charge = " +
