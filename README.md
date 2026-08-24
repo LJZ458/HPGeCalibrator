@@ -20,6 +20,7 @@ The application runs on macOS and Linux with Qt 6 and a CERN ROOT installation. 
 - Draws each fitted peak curve and centroid in red, without covering the spectrum with a selected-range band.
 - Reconstructs stored red fit curves whenever a calibration-result spectrum is reopened, automatically choosing a source containing fitted points when necessary.
 - Finds peak patterns independently in the reference and target spectra, without using the user-assigned energy lines or relative peak intensities. Missing peaks and additional contaminant peaks are tolerated.
+- Provides conservative, balanced, and high alignment-peak sensitivity presets. Conservative mode ranks multi-bin peak support instead of single-bin height, rejects background spikes, and limits the reference pattern for low-statistics spectra.
 - Seeds alignment from peak spacings, then refines a monotonic second-order charge mapping for broad sources such as Co-56; two-line Co-60 alignment remains affine.
 - Previews the pattern mapping before calibration by overlaying normalized spectra in a common reference-charge coordinate.
 - Provides separate **Zoom / pan** and **Select peak-fit range** mouse modes so inspecting a spectrum cannot accidentally create a fit interval. Wheel zoom and right-drag pan remain available while selecting fit limits; Back, Zoom −, Zoom +, Reset, left-drag zoom, and double-click reset provide ROOT-like navigation. The zoom window stays fixed when modes change or fitted overlays are added.
@@ -69,9 +70,10 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-The test suite reports twenty-four focused checks separately: peak discovery and refinement,
+The test suite reports twenty-five focused checks separately: peak discovery and refinement,
 single- and multi-peak mapping, RadWare peak fitting and validation, mapped interval fitting,
-intensity-independent and two-line pattern alignment, wide-range Co-56 crystal alignment and
+intensity-independent and two-line pattern alignment, wide-range Co-56 crystal alignment,
+low-statistics spike rejection and alignment sensitivity, and
 alignment validation, quadratic fitting and validation, recursive histogram discovery/cache loading, both TH2 axis
 orientations, repeated multi-file projection/cache cycling, repository error handling, and sample
 ROOT-file generation, combined calibrated-spectrum/FWHM analysis, three-list C++ export,
@@ -109,7 +111,7 @@ If Qt reports that the `xcb` platform plugin cannot be initialized on a minimal 
 
 1. In **Data**, add one or several ROOT files in the file browser. Select one or more discovered `TH2` histograms, choose the axis orientation, reference crystal, and crystals to calibrate.
 2. In **Reference peaks**, choose the first source histogram and show its reference spectrum. Select the radioactive source first so only that source's energies are listed. Use the zoom toolbar, wheel, or **Zoom / pan** mode to inspect the spectrum, then switch to **Select peak-fit range**, select an energy, and click the lower and upper fit limits. The zoomed view remains in place, and the red RadWare fit curve, fitted centroid, and energy label remain visible. Repeat for all usable lines and source histograms.
-3. In **Calibration & review**, choose a histogram and target crystal under **Pre-calibration spectrum alignment**, then click **Show aligned spectra**. The blue reference and red target spectra are normalized and overlaid after independent peak-pattern mapping; no user-selected energy lines or peak intensities are used. The status bar reports the matched-pattern count and charge-mapping coefficients. This is intentionally a rough charge-axis diagnostic—every calibration peak is subsequently refitted, and no energy calibration is applied in the preview.
+3. In **Calibration & review**, choose an alignment sensitivity, histogram, and target crystal under **Pre-calibration spectrum alignment**, then click **Show aligned spectra**. Use **Conservative — reject spikes** for low-count spectra, **Balanced** for typical data, or **High** only when genuine peaks are unusually weak or narrow. The blue reference and red target spectra are normalized and overlaid after independent peak-pattern mapping; no user-selected energy lines or peak intensities are used. The status bar reports the matched-pattern count and charge-mapping coefficients. This is intentionally a rough charge-axis diagnostic—every calibration peak is subsequently refitted, and no energy calibration is applied in the preview. The same sensitivity setting is used by automatic calibration.
 4. Adjust peak-search parameters if necessary and calibrate the selected crystals. At least three total reference points are required for a quadratic fit; four or more provide a meaningful residual-based quality check.
 5. Select any `REVIEW` or `FAIL` result. Choose its source histogram and energy, show the spectrum, click the lower and upper limits around the correct peak, and press **Refit crystal**. A manual centroid replaces the automatic point for that dataset and energy. After refitting, the spectrum stays visible with the fitted peak overlays.
 6. Inspect **Fit + residuals**; residual x coordinates are the assigned peak energies rather than charge centroids.

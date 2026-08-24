@@ -67,6 +67,7 @@ private:
     std::vector<int> SelectedDescriptorIndices() const;
     std::vector<int> SelectedCrystals() const;
     AxisOrientation Orientation() const;
+    CalibrationEngine::AlignmentSensitivity AlignmentSensitivity() const;
     int ReferenceCrystal() const;
     int CurrentResultCrystal() const;
     const HistogramDescriptor* DescriptorForCombo(const QComboBox* combo) const;
@@ -125,6 +126,7 @@ private:
     QDoubleSpinBox* sigmaEntry_ = nullptr;
     QDoubleSpinBox* thresholdEntry_ = nullptr;
     QDoubleSpinBox* residualLimitEntry_ = nullptr;
+    QComboBox* alignmentSensitivityCombo_ = nullptr;
     QComboBox* alignmentHistogramCombo_ = nullptr;
     QSpinBox* alignmentCrystalEntry_ = nullptr;
     QListWidget* resultList_ = nullptr;

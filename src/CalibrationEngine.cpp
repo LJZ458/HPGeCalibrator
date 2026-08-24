@@ -209,21 +209,100 @@ double NearestCandidate(const std::vector<double>& candidates, double expected,
 
 std::vector<double> StrongPatternCandidates(const TH1& histogram,
                                             const CalibrationEngine::SearchOptions& options) {
-    auto patternOptions = options;
-    patternOptions.threshold = std::min(options.threshold, 0.02);
-    patternOptions.maxPeaks = std::max(options.maxPeaks, 48);
-    auto candidates = CalibrationEngine::FindPeakCandidates(histogram, patternOptions);
-    constexpr std::size_t maximumPatternPeaks = 24;
-    if (candidates.size() > maximumPatternPeaks) {
-        std::sort(candidates.begin(), candidates.end(), [&](double left, double right) {
-            const int leftBin = histogram.GetXaxis()->FindBin(left);
-            const int rightBin = histogram.GetXaxis()->FindBin(right);
-            return histogram.GetBinContent(leftBin) > histogram.GetBinContent(rightBin);
-        });
-        candidates.resize(maximumPatternPeaks);
-        std::sort(candidates.begin(), candidates.end());
+    struct CandidateQuality {
+        double charge = 0.0;
+        double score = 0.0;
+    };
+    struct SensitivityPreset {
+        double searchThreshold = 0.015;
+        double maximumCentralFraction = 0.86;
+        double supportNoiseFraction = 0.55;
+        int minimumSupportingBins = 1;
+        double minimumIntegratedSignificance = 2.0;
+        std::size_t maximumCandidates = 18;
+    } preset;
+
+    switch (options.alignmentSensitivity) {
+    case CalibrationEngine::AlignmentSensitivity::Conservative:
+        preset = {0.018, 0.72, 0.75, 2, 3.0, 12};
+        break;
+    case CalibrationEngine::AlignmentSensitivity::Balanced:
+        break;
+    case CalibrationEngine::AlignmentSensitivity::High:
+        preset = {0.004, 0.995, 0.0, 0, 0.5, 24};
+        break;
     }
-    return candidates;
+
+    auto patternOptions = options;
+    patternOptions.threshold = preset.searchThreshold;
+    patternOptions.maxPeaks = std::max(options.maxPeaks, 64);
+    const auto candidates = CalibrationEngine::FindPeakCandidates(histogram, patternOptions);
+    std::vector<CandidateQuality> accepted;
+    accepted.reserve(candidates.size());
+    const int binCount = histogram.GetNbinsX();
+    const int coreRadius = std::max(2, static_cast<int>(std::ceil(1.5 * options.sigmaBins)));
+    const int sidebandGap = std::max(2, coreRadius / 2);
+    const int sidebandWidth = std::max(4, coreRadius + 1);
+    for (double candidate : candidates) {
+        int center = std::clamp(histogram.GetXaxis()->FindBin(candidate), 1, binCount);
+        const int localRadius = std::max(1, static_cast<int>(std::ceil(options.sigmaBins)));
+        for (int bin = std::max(1, center - localRadius);
+             bin <= std::min(binCount, center + localRadius); ++bin) {
+            if (histogram.GetBinContent(bin) > histogram.GetBinContent(center)) center = bin;
+        }
+
+        std::vector<double> sideband;
+        sideband.reserve(2 * sidebandWidth);
+        const int leftEnd = center - coreRadius - sidebandGap;
+        const int leftStart = leftEnd - sidebandWidth + 1;
+        const int rightStart = center + coreRadius + sidebandGap;
+        const int rightEnd = rightStart + sidebandWidth - 1;
+        for (int bin = std::max(1, leftStart); bin <= std::min(binCount, leftEnd); ++bin) {
+            sideband.push_back(histogram.GetBinContent(bin));
+        }
+        for (int bin = std::max(1, rightStart); bin <= std::min(binCount, rightEnd); ++bin) {
+            sideband.push_back(histogram.GetBinContent(bin));
+        }
+        if (sideband.empty()) continue;
+        const auto middle = sideband.begin() + static_cast<std::ptrdiff_t>(sideband.size() / 2);
+        std::nth_element(sideband.begin(), middle, sideband.end());
+        const double background = std::max(*middle, 0.0);
+        const double noise = std::sqrt(background + 1.0);
+        double integratedExcess = 0.0;
+        double centerExcess = 0.0;
+        int supportingBins = 0;
+        int observedCoreBins = 0;
+        for (int bin = std::max(1, center - coreRadius);
+             bin <= std::min(binCount, center + coreRadius); ++bin) {
+            const double excess = std::max(histogram.GetBinContent(bin) - background, 0.0);
+            integratedExcess += excess;
+            ++observedCoreBins;
+            if (bin == center) centerExcess = excess;
+            else if (excess >= preset.supportNoiseFraction * noise) ++supportingBins;
+        }
+        if (!(integratedExcess > 0.0)) continue;
+        const double centralFraction = centerExcess / integratedExcess;
+        const double significance = integratedExcess /
+            std::sqrt(static_cast<double>(observedCoreBins) * (background + 1.0));
+        if (centralFraction > preset.maximumCentralFraction ||
+            supportingBins < preset.minimumSupportingBins ||
+            significance < preset.minimumIntegratedSignificance) {
+            continue;
+        }
+        // Integrated support ranks broad photopeaks ahead of isolated high bins.
+        accepted.push_back({histogram.GetXaxis()->GetBinCenter(center),
+                            significance * (1.0 - 0.5 * centralFraction)});
+    }
+    std::sort(accepted.begin(), accepted.end(), [](const CandidateQuality& left,
+                                                   const CandidateQuality& right) {
+        return left.score > right.score;
+    });
+    if (accepted.size() > preset.maximumCandidates) accepted.resize(preset.maximumCandidates);
+    std::vector<double> selected;
+    selected.reserve(accepted.size());
+    for (const auto& candidate : accepted) selected.push_back(candidate.charge);
+    std::sort(selected.begin(), selected.end());
+    return selected;
 }
 
 PeakMatchResult EvaluatePatternTransform(const std::vector<double>& reference,

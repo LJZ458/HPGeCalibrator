@@ -66,6 +66,35 @@ TH1D MakeVariableIntensitySpectrum(const char* name,
     return histogram;
 }
 
+TH1D MakeLowStatisticsSpikySpectrum(const char* name,
+                                    const std::vector<double>& centers,
+                                    const std::vector<double>& amplitudes,
+                                    double scale, double offset,
+                                    const std::vector<int>& spikeBins) {
+    TH1D histogram(name, name, 4096, 0.0, 4096.0);
+    for (int bin = 1; bin <= histogram.GetNbinsX(); ++bin) {
+        const double x = histogram.GetBinCenter(bin);
+        double value = 1.4 + 0.18 * std::sin(0.019 * x) + 0.12 * std::sin(0.071 * x);
+        for (std::size_t index = 0; index < centers.size(); ++index) {
+            const double mapped = offset + scale * centers[index];
+            value += amplitudes[index] *
+                     std::exp(-0.5 * std::pow((x - mapped) / 3.2, 2));
+        }
+        histogram.SetBinContent(bin, std::max(value, 0.0));
+    }
+    for (std::size_t index = 0; index < spikeBins.size(); ++index) {
+        const int bin = spikeBins[index];
+        histogram.SetBinContent(bin, histogram.GetBinContent(bin) +
+            32.0 + 7.0 * static_cast<double>(index % 4));
+        // A small two-bin skirt makes the detector-search stage see the feature,
+        // while its shape remains much narrower than a real HPGe photopeak.
+        histogram.SetBinContent(bin - 1, histogram.GetBinContent(bin - 1) + 5.0);
+        histogram.SetBinContent(bin + 1, histogram.GetBinContent(bin + 1) + 5.0);
+    }
+    histogram.SetEntries(4200.0);
+    return histogram;
+}
+
 double ChargeForEnergy(double energy, double p0, double p1, double p2) {
     return (-p1 + std::sqrt(p1 * p1 - 4.0 * p2 * (p0 - energy))) / (2.0 * p2);
 }
@@ -287,6 +316,58 @@ bool TestCo56CrystalPatternAlignment() {
     return accurate;
 }
 
+bool TestLowStatisticsSpikeAlignment() {
+    const std::vector<double> peaks{590.0, 980.0, 1480.0, 2160.0, 2920.0};
+    const double expectedScale = 1.047;
+    const double expectedOffset = 24.0;
+    auto reference = MakeLowStatisticsSpikySpectrum(
+        "low_statistics_reference", peaks, {18.0, 10.0, 15.0, 11.0, 14.0}, 1.0, 0.0,
+        {173, 418, 755, 1211, 1813, 2457, 3331, 3719});
+    auto target = MakeLowStatisticsSpikySpectrum(
+        "low_statistics_target", peaks, {8.0, 17.0, 9.0, 16.0, 10.0},
+        expectedScale, expectedOffset,
+        {95, 347, 681, 1137, 1679, 2533, 3187, 3971});
+
+    hpge::CalibrationEngine::SearchOptions conservativeOptions;
+    conservativeOptions.alignmentSensitivity =
+        hpge::CalibrationEngine::AlignmentSensitivity::Conservative;
+    const auto conservative = hpge::CalibrationEngine::AlignSpectrumPatterns(
+        reference, target, conservativeOptions);
+    if (!conservative.success) {
+        std::cerr << "Conservative low-statistics alignment failed\n";
+        return false;
+    }
+    const int matched = static_cast<int>(
+        std::count(conservative.matched.begin(), conservative.matched.end(), true));
+    if (conservative.referenceCharges.size() > peaks.size() + 1) {
+        std::cerr << "Conservative sensitivity retained too many reference candidates: "
+                  << conservative.referenceCharges.size() << '\n';
+        return false;
+    }
+    for (double peak : peaks) {
+        const bool retained = std::any_of(
+            conservative.referenceCharges.begin(), conservative.referenceCharges.end(),
+            [peak](double candidate) { return std::abs(candidate - peak) <= 3.0; });
+        if (!retained) {
+            std::cerr << "Conservative sensitivity rejected real low-count peak " << peak << '\n';
+            return false;
+        }
+    }
+
+    hpge::CalibrationEngine::SearchOptions highOptions;
+    highOptions.alignmentSensitivity = hpge::CalibrationEngine::AlignmentSensitivity::High;
+    const auto high = hpge::CalibrationEngine::AlignSpectrumPatterns(reference, target, highOptions);
+    if (high.referenceCharges.size() <= conservative.referenceCharges.size()) {
+        std::cerr << "Alignment sensitivity switch did not retain additional candidates\n";
+        return false;
+    }
+    return matched >= 4 &&
+           Near(conservative.scale, expectedScale, 0.012,
+                "low-statistics alignment scale") &&
+           Near(conservative.offset, expectedOffset, 9.0,
+                "low-statistics alignment offset");
+}
+
 bool TestPatternAlignmentValidation() {
     TH1D emptyReference("empty_pattern_reference", "empty", 100, 0.0, 100.0);
     TH1D emptyTarget("empty_pattern_target", "empty", 100, 0.0, 100.0);
@@ -390,6 +471,7 @@ int main(int argc, char** argv) {
     else if (test == "spectrum-alignment") passed = TestSpectrumAlignment();
     else if (test == "two-peak-pattern-alignment") passed = TestTwoPeakPatternAlignment();
     else if (test == "co56-crystal-pattern-alignment") passed = TestCo56CrystalPatternAlignment();
+    else if (test == "low-statistics-spike-alignment") passed = TestLowStatisticsSpikeAlignment();
     else if (test == "pattern-alignment-validation") passed = TestPatternAlignmentValidation();
     else if (test == "fit-quadratic") passed = TestFitQuadratic();
     else if (test == "fit-validation") passed = TestFitValidation();

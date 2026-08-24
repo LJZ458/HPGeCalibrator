@@ -350,13 +350,23 @@ QWidget* MainWindow::BuildCalibrationTab() {
 
     auto* alignment = new QGroupBox("Pre-calibration spectrum alignment");
     auto* alignmentLayout = new QVBoxLayout(alignment);
-    alignmentLayout->addWidget(Hint("Rough diagnostic overlay after intensity-independent peak-pattern mapping; calibration still refits every mapped peak."));
+    alignmentLayout->addWidget(Hint("Rough diagnostic overlay after intensity-independent peak-pattern mapping; calibration still refits every mapped peak. Conservative sensitivity is recommended for low-count spectra with background spikes."));
+    alignmentSensitivityCombo_ = new QComboBox;
+    alignmentSensitivityCombo_->addItem("Conservative — reject spikes");
+    alignmentSensitivityCombo_->addItem("Balanced");
+    alignmentSensitivityCombo_->addItem("High — retain weak/narrow peaks");
+    alignmentSensitivityCombo_->setCurrentIndex(0);
+    alignmentSensitivityCombo_->setToolTip(
+        "Controls only the peaks used to align spectrum patterns. Conservative requires "
+        "multi-bin peak support and selects fewer reference candidates.");
     alignmentHistogramCombo_ = new QComboBox;
     alignmentCrystalEntry_ = new QSpinBox;
     alignmentCrystalEntry_->setRange(0, 63);
     alignmentCrystalEntry_->setValue(1);
     auto* align = new QPushButton("Show aligned spectra");
     connect(align, &QPushButton::clicked, this, [this] { ShowSpectrumAlignment(); });
+    alignmentLayout->addWidget(Row({new QLabel("Reference-peak sensitivity"),
+                                    alignmentSensitivityCombo_}));
     alignmentLayout->addWidget(alignmentHistogramCombo_);
     alignmentLayout->addWidget(Row({new QLabel("Target crystal"), alignmentCrystalEntry_}));
     alignmentLayout->addWidget(align);
@@ -580,6 +590,16 @@ std::vector<int> MainWindow::SelectedCrystals() const {
 
 AxisOrientation MainWindow::Orientation() const {
     return orientationCombo_->currentIndex() == 1 ? AxisOrientation::ChargeOnY : AxisOrientation::ChargeOnX;
+}
+
+CalibrationEngine::AlignmentSensitivity MainWindow::AlignmentSensitivity() const {
+    if (alignmentSensitivityCombo_->currentIndex() == 0) {
+        return CalibrationEngine::AlignmentSensitivity::Conservative;
+    }
+    if (alignmentSensitivityCombo_->currentIndex() == 2) {
+        return CalibrationEngine::AlignmentSensitivity::High;
+    }
+    return CalibrationEngine::AlignmentSensitivity::Balanced;
 }
 
 int MainWindow::ReferenceCrystal() const { return referenceCrystalEntry_->value(); }
@@ -829,6 +849,7 @@ std::vector<CalibrationPoint> MainWindow::BuildPointsForCrystal(int crystal) {
     CalibrationEngine::SearchOptions options;
     options.sigmaBins = sigmaEntry_->value();
     options.threshold = thresholdEntry_->value();
+    options.alignmentSensitivity = AlignmentSensitivity();
     for (int descriptorIndex : SelectedDescriptorIndices()) {
         const auto& descriptor = descriptors_[descriptorIndex];
         std::vector<ReferencePeak> references;
@@ -1059,6 +1080,7 @@ void MainWindow::ShowSpectrumAlignment() {
     CalibrationEngine::SearchOptions options;
     options.sigmaBins = sigmaEntry_->value();
     options.threshold = thresholdEntry_->value();
+    options.alignmentSensitivity = AlignmentSensitivity();
     const auto match = CalibrationEngine::AlignSpectrumPatterns(*reference, *target, options);
     if (!match.success || !(match.scale > 0.0) || !std::isfinite(match.scale) || !std::isfinite(match.offset)) {
         SetStatus("Could not align this spectrum: not enough corresponding peaks were found.");
