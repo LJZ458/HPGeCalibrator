@@ -1,65 +1,73 @@
 #include "MainWindow.h"
 
 #include <TApplication.h>
-#include <TEnv.h>
 #include <TGClient.h>
-#include <TGPicture.h>
 #include <TROOT.h>
-#include <TString.h>
 #include <TVirtualX.h>
 
-#if defined(HPGE_USE_COCOA)
-#include <TGCocoa.h>
-#elif defined(HPGE_USE_X11)
-#include <TGX11.h>
-#endif
-
-#include <memory>
+#include <cstdlib>
+#include <exception>
+#include <iostream>
 
 namespace {
 
-class NativeClient final : public TGClient {
-public:
-    NativeClient(const char* displayName, const char* iconPath) : TGClient(displayName) {
-        defaultPicturePool_ = fPicturePool;
-        fPicturePool = new TGPicturePool(this, iconPath);
-    }
+bool HasDisplay() {
+#if defined(__linux__) || defined(__FreeBSD__)
+    const char* display = std::getenv("DISPLAY");
+    return display && display[0] != '\0';
+#else
+    return true;
+#endif
+}
 
-    ~NativeClient() override {
-        delete fPicturePool;
-        fPicturePool = defaultPicturePool_;
-    }
-
-private:
-    TGPicturePool* defaultPicturePool_ = nullptr;
-};
+void PrintHeadlessError() {
+    std::cerr
+        << "HPGe Calibrator requires a graphical display, but DISPLAY is not set.\n"
+        << "Run it from a desktop session, use 'ssh -X'/'ssh -Y', or start it under Xvfb.\n";
+}
 
 } // namespace
 
 int main(int argc, char** argv) {
-    // Set this before TApplication: TROOT caches the icon search path during
-    // application construction.
-    gEnv->SetValue("Gui.IconPath", HPGE_ROOT_ICON_PATH);
-    const_cast<TString&>(TROOT::GetIconPath()) = HPGE_ROOT_ICON_PATH;
+    // ROOT's classic GUI on Linux uses X11 (directly or through XWayland). Avoid
+    // entering ROOT's GUI loader when no display is available: some ROOT builds
+    // abort or segfault instead of returning a null backend in this situation.
+    if (!HasDisplay()) {
+        PrintHeadlessError();
+        return 2;
+    }
+
+    // This is ROOT's supported sequence for a compiled native GUI. It lets ROOT
+    // select the correct platform plugin (GX11 on Linux, Cocoa on macOS) instead
+    // of replacing the global TVirtualX/TGClient objects ourselves.
+    TApplication::NeedGraphicsLibs();
     TApplication application("hpge-calibrator", &argc, argv);
-
-    // Construct the platform graphics backend directly. ROOT normally loads this
-    // through Cling's plugin manager; direct construction is deterministic and
-    // also works when the installed compiler and ROOT's Cling differ.
-    std::unique_ptr<TVirtualX> graphics;
-#if defined(HPGE_USE_COCOA)
-    graphics = std::make_unique<TGCocoa>("Cocoa", "HPGe Calibrator Cocoa backend");
-#elif defined(HPGE_USE_X11)
-    graphics = std::make_unique<TGX11>("X11", "HPGe Calibrator X11 backend");
-#else
     application.InitializeGraphics();
-#endif
-    if (graphics) gVirtualX = graphics.get();
-    std::unique_ptr<TGClient> client;
-    if (!gClient) client = std::make_unique<NativeClient>(nullptr, HPGE_ROOT_ICON_PATH);
-    if (!gClient) return 2;
 
-    new hpge::MainWindow(gClient->GetRoot(), 1440, 900);
-    application.Run();
+    if (gROOT->IsBatch() || !gVirtualX || gVirtualX == gGXBatch) {
+        std::cerr
+            << "HPGe Calibrator could not initialize ROOT's graphical backend.\n"
+            << "Install a ROOT build with GUI/X11 support and verify that DISPLAY is reachable.\n";
+        return 3;
+    }
+
+    TGClient* client = gClient;
+    if (!client || !client->GetRoot()) {
+        std::cerr
+            << "HPGe Calibrator could not initialize ROOT's GUI client.\n"
+            << "Check that libGui and the platform graphics plugin are installed.\n";
+        return 4;
+    }
+
+    try {
+        new hpge::MainWindow(client->GetRoot(), 1440, 900);
+        application.Run();
+    } catch (const std::exception& error) {
+        std::cerr << "HPGe Calibrator failed during GUI startup: " << error.what() << '\n';
+        return 5;
+    } catch (...) {
+        std::cerr << "HPGe Calibrator failed during GUI startup with an unknown error.\n";
+        return 5;
+    }
     return 0;
 }

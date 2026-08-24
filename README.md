@@ -52,6 +52,21 @@ On macOS, start it from a normal graphical Terminal session. On Linux, an X11 or
 
 If ROOT prints Cling module-map errors on a newly upgraded macOS/Xcode installation, reinstall or upgrade ROOT so it is built against the active Xcode command-line tools. The application avoids runtime-interpreted calibration and callback code, but ROOT's own optional image/plugin loader can still warn when the ROOT and Xcode standard-library versions do not match.
 
+### Debian/Linux startup troubleshooting
+
+The native ROOT GUI requires an accessible X11 display. Confirm the environment before starting:
+
+```bash
+echo "$DISPLAY"
+root-config --features | grep -E 'x11|cocoa|webgui'
+ldd ./build/hpge-calibrator | grep 'not found'
+```
+
+For a local Debian desktop, `DISPLAY` is normally set automatically. For SSH, connect with
+`ssh -X` or `ssh -Y`. For a headless machine, use `xvfb-run ./build/hpge-calibrator` after
+installing `xvfb`. If GUI initialization is unavailable, the program exits with a diagnostic
+instead of entering ROOT with a null graphics backend.
+
 ## Calibration workflow
 
 1. In **Data**, add each ROOT file. Select one or more discovered `TH2` histograms, choose the axis orientation, reference crystal, and crystals to calibrate.

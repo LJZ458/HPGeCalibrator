@@ -22,21 +22,9 @@ add_executable(hpge-calibrator
 target_include_directories(hpge-calibrator PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-list(GET ROOT_INCLUDE_DIRS 0 HPGE_ROOT_INCLUDE_DIR)
-get_filename_component(HPGE_ROOT_PREFIX "${HPGE_ROOT_INCLUDE_DIR}/../.." ABSOLUTE)
-target_compile_definitions(hpge-calibrator PRIVATE
-    HPGE_ROOT_ICON_PATH="${HPGE_ROOT_PREFIX}/share/root/icons"
-)
 target_link_libraries(hpge-calibrator PRIVATE
     hpge_core ROOT::Gui ROOT::Gpad ROOT::Tree
 )
-if(APPLE AND TARGET ROOT::GCocoa)
-    target_link_libraries(hpge-calibrator PRIVATE ROOT::GCocoa)
-    target_compile_definitions(hpge-calibrator PRIVATE HPGE_USE_COCOA=1)
-elseif(UNIX AND TARGET ROOT::GX11)
-    target_link_libraries(hpge-calibrator PRIVATE ROOT::GX11)
-    target_compile_definitions(hpge-calibrator PRIVATE HPGE_USE_X11=1)
-endif()
 
 add_executable(hpge-generate-sample tools/generate_sample.cpp)
 target_link_libraries(hpge-generate-sample PRIVATE ROOT::Core ROOT::RIO ROOT::Hist)
@@ -66,6 +54,14 @@ if(BUILD_TESTING)
         add_test(NAME repository-${test_case}
                  COMMAND hpge-repository-tests ${test_case})
     endforeach()
+
+    if(UNIX AND NOT APPLE)
+        add_test(NAME startup-headless-guard COMMAND hpge-calibrator)
+        set_tests_properties(startup-headless-guard PROPERTIES
+            ENVIRONMENT "DISPLAY="
+            WILL_FAIL TRUE
+        )
+    endif()
 endif()
 
 install(TARGETS hpge-calibrator hpge-generate-sample RUNTIME DESTINATION bin)
