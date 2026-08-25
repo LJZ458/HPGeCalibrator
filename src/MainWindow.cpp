@@ -5,6 +5,7 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
@@ -347,7 +348,7 @@ QWidget* MainWindow::BuildCalibrationTab() {
     auto* page = new QWidget;
     auto* layout = new QVBoxLayout(page);
     layout->setContentsMargins(12, 12, 12, 12);
-    auto* settings = new QGroupBox("Automatic peak matching");
+    auto* settings = new QGroupBox("Automatic peak fitting");
     auto* settingsLayout = new QVBoxLayout(settings);
     sigmaEntry_ = RealEntry(2.0, 1, 0.1, 50.0);
     thresholdEntry_ = RealEntry(0.05, 3, 0.001, 1.0);
@@ -369,6 +370,12 @@ QWidget* MainWindow::BuildCalibrationTab() {
     alignmentSensitivityEntry_->setToolTip(
         "Continuous starting sensitivity: lower values reject more narrow/noisy candidates; "
         "higher values retain weaker peaks.");
+    alignedFitHalfRangeEntry_ = RealEntry(35.0, 1, 1.0, 1000.0);
+    alignedFitHalfRangeEntry_->setObjectName("alignedFitHalfRangeEntry");
+    alignedFitHalfRangeEntry_->setSuffix(" charge");
+    alignedFitHalfRangeEntry_->setToolTip(
+        "Half-width in aligned reference-spectrum charge. The exact interval is mapped "
+        "into the target spectrum before the RadWare centroid fit.");
     autoTuneAlignmentEntry_ = new QCheckBox("Auto-tune for each crystal spectrum");
     autoTuneAlignmentEntry_->setChecked(true);
     alignmentModelCombo_ = new QComboBox;
@@ -385,17 +392,41 @@ QWidget* MainWindow::BuildCalibrationTab() {
     connect(align, &QPushButton::clicked, this, [this] { ShowSpectrumAlignment(); });
     alignmentLayout->addWidget(Row({new QLabel("Peak sensitivity"),
                                     alignmentSensitivityEntry_}));
+    alignmentLayout->addWidget(Row({new QLabel("Aligned peak-fit half-range"),
+                                    alignedFitHalfRangeEntry_}));
     alignmentLayout->addWidget(autoTuneAlignmentEntry_);
     alignmentLayout->addWidget(Row({new QLabel("Charge mapping"), alignmentModelCombo_}));
     alignmentLayout->addWidget(alignmentHistogramCombo_);
     alignmentLayout->addWidget(Row({new QLabel("Target crystal"), alignmentCrystalEntry_}));
     alignmentLayout->addWidget(align);
+    alignmentPreviewParameters_ = new QLabel("No alignment has been previewed.");
+    alignmentPreviewParameters_->setObjectName("alignmentPreviewParameters");
+    alignmentPreviewParameters_->setWordWrap(true);
+    alignmentPreviewParameters_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    alignmentLayout->addWidget(alignmentPreviewParameters_);
     layout->addWidget(alignment);
 
     layout->addWidget(new QLabel("Calibration results"));
     resultList_ = new QListWidget;
     resultList_->setMinimumHeight(135);
     layout->addWidget(resultList_);
+    layout->addWidget(new QLabel("Alignment parameters for selected crystal"));
+    alignmentParameterList_ = new QListWidget;
+    alignmentParameterList_->setObjectName("alignmentParameterList");
+    alignmentParameterList_->setMaximumHeight(105);
+    layout->addWidget(alignmentParameterList_);
+    auto* copyAlignment = new QPushButton("Copy selected alignment parameters");
+    copyAlignment->setObjectName("copyAlignmentParametersButton");
+    connect(copyAlignment, &QPushButton::clicked, this, [this] {
+        const auto* item = alignmentParameterList_->currentItem();
+        if (!item) {
+            SetStatus("Select an alignment-parameter row to copy.");
+            return;
+        }
+        QApplication::clipboard()->setText(item->text());
+        SetStatus("Copied the selected alignment parameters to the clipboard.");
+    });
+    layout->addWidget(copyAlignment);
     layout->addWidget(new QLabel("Fitted source spectra used by selected result"));
     resultSpectrumCombo_ = new QComboBox;
     resultSpectrumCombo_->setObjectName("resultSpectrumCombo");
@@ -536,6 +567,7 @@ void MainWindow::ConnectActions() {
     connect(resultList_, &QListWidget::currentRowChanged, this, [this] {
         if (updatingWidgets_) return;
         UpdateManualCorrectionForSelection();
+        RefreshAlignmentParameterList();
         RefreshResultSpectrumChoices();
         ShowAllResultSpectra();
     });
@@ -1122,6 +1154,33 @@ void MainWindow::RefreshReferencePeakList() {
     }
 }
 
+void MainWindow::RefreshAlignmentParameterList() {
+    alignmentParameterList_->clear();
+    const int crystal = CurrentResultCrystal();
+    if (crystal < 0) return;
+    for (const auto& descriptor : descriptors_) {
+        const auto stored = alignmentResults_.find({crystal, descriptor.id});
+        if (stored == alignmentResults_.end()) continue;
+        const auto& alignment = stored->second;
+        const int matched = static_cast<int>(
+            std::count(alignment.matched.begin(), alignment.matched.end(), true));
+        const std::string state = alignment.success ? "OK" : "FAILED";
+        const std::string model = alignment.quadraticModel ? "quadratic" : "affine";
+        alignmentParameterList_->addItem(Text(
+            "[" + state + "] " + descriptor.displayName + " | C" +
+            std::to_string(crystal) + " | " + model + " | a0=" +
+            FormatPrecise(alignment.offset) + " | a1=" +
+            FormatPrecise(alignment.scale) + " | a2=" +
+            FormatPrecise(alignment.quadratic) + " | cost=" +
+            FormatNumber(alignment.alignmentCost, 4) + " | matched=" +
+            std::to_string(matched) + "/" +
+            std::to_string(alignment.referenceCharges.size()) + " | sensitivity=" +
+            FormatNumber(100.0 * alignment.referenceSensitivity, 1) + "%/" +
+            FormatNumber(100.0 * alignment.targetSensitivity, 1) + "%"));
+    }
+    if (alignmentParameterList_->count() > 0) alignmentParameterList_->setCurrentRow(0);
+}
+
 void MainWindow::RefreshFittedPointList() {
     fittedPointList_->clear();
     const int crystal = CurrentResultCrystal();
@@ -1177,42 +1236,38 @@ std::vector<CalibrationPoint> MainWindow::BuildPointsForCrystal(int crystal) {
             return a.charge < b.charge;
         });
         if (crystal == ReferenceCrystal()) {
+            PeakMatchResult identity;
+            identity.success = true;
+            identity.referenceCharges.reserve(references.size());
+            identity.charges.reserve(references.size());
+            identity.matched.assign(references.size(), true);
             for (const auto& ref : references) {
+                identity.referenceCharges.push_back(ref.peakFit.centroid);
+                identity.charges.push_back(ref.peakFit.centroid);
                 points.push_back({descriptor.id, ref.peakFit.centroid, ref.energy,
                                   ref.peakFit.centroidError, false, 0.0, ref.peakFit});
             }
+            alignmentResults_[{crystal, descriptor.id}] = std::move(identity);
             continue;
         }
         std::string error;
         auto referenceSpectrum = repository_.ProjectCrystal(descriptor, ReferenceCrystal(), Orientation(), error);
         auto spectrum = repository_.ProjectCrystal(descriptor, crystal, Orientation(), error);
         if (!referenceSpectrum || !spectrum) continue;
-        std::vector<double> referenceCharges;
-        referenceCharges.reserve(references.size());
+        const auto alignment = CalibrationEngine::AlignSpectrumPatterns(
+            *referenceSpectrum, *spectrum, options);
+        alignmentResults_[{crystal, descriptor.id}] = alignment;
+        if (!alignment.success) continue;
+        const double halfRange = alignedFitHalfRangeEntry_->value();
         for (const auto& reference : references) {
-            referenceCharges.push_back(reference.peakFit.centroid);
-        }
-        const auto correspondence = CalibrationEngine::FindCorrespondingPeaks(
-            *referenceSpectrum, *spectrum, referenceCharges, options);
-        for (std::size_t index = 0; index < references.size(); ++index) {
-            if (index >= correspondence.matched.size() || !correspondence.matched[index]) continue;
-            const auto& reference = references[index];
-            const double derivative = std::abs(
-                correspondence.scale + 2.0 * correspondence.quadratic * reference.peakFit.centroid);
-            const double mappedHalfWidth = 0.5 *
-                (reference.peakFit.rangeHigh - reference.peakFit.rangeLow) *
-                std::clamp(derivative, 0.5, 2.0);
-            const double minimumHalfWidth =
-                6.5 * spectrum->GetXaxis()->GetBinWidth(1);
-            const double halfWidth = std::max(1.15 * mappedHalfWidth, minimumHalfWidth);
-            const double candidate = correspondence.charges[index];
-            auto fit = CalibrationEngine::FitRadwarePeak(
-                *spectrum, candidate - halfWidth, candidate + halfWidth);
-            if (!fit.success) {
-                fit = CalibrationEngine::FitRadwarePeak(
-                    *spectrum, candidate - 1.75 * halfWidth,
-                    candidate + 1.75 * halfWidth);
-            }
+            // The interval is defined exactly in the aligned reference-charge
+            // coordinate and mapped at both boundaries. No second peak finder
+            // is allowed to move it to an unrelated target candidate.
+            const double low = CalibrationEngine::MapReferenceCharge(
+                alignment, reference.peakFit.centroid - halfRange);
+            const double high = CalibrationEngine::MapReferenceCharge(
+                alignment, reference.peakFit.centroid + halfRange);
+            const auto fit = CalibrationEngine::FitRadwarePeak(*spectrum, low, high);
             if (fit.success) {
                 points.push_back({descriptor.id, fit.centroid, reference.energy,
                                   fit.centroidError, false, 0.0, fit});
@@ -1255,6 +1310,7 @@ void MainWindow::RunCalibration() {
     SetStatus("Calibrating " + std::to_string(crystals.size()) + " crystals...");
     QApplication::processEvents();
     results_.clear();
+    alignmentResults_.clear();
     for (int crystal : crystals) {
         results_[crystal] = CalibrateCrystal(crystal);
         QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
@@ -1403,6 +1459,7 @@ void MainWindow::ShowCombinedSpectrum() {
 void MainWindow::ShowSpectrumAlignment() {
     const auto* descriptor = DescriptorForCombo(alignmentHistogramCombo_);
     if (!descriptor) {
+        alignmentPreviewParameters_->setText("No alignment parameters are available.");
         SetStatus("Choose a source histogram for the alignment preview.");
         return;
     }
@@ -1419,6 +1476,7 @@ void MainWindow::ShowSpectrumAlignment() {
     auto reference = repository_.ProjectCrystal(*descriptor, referenceCrystal, Orientation(), error);
     auto target = repository_.ProjectCrystal(*descriptor, targetCrystal, Orientation(), error);
     if (!reference || !target) {
+        alignmentPreviewParameters_->setText("Alignment failed: " + Text(error));
         primaryPlot_->Clear("Alignment preview unavailable for " + previewName + ": " + error);
         SetStatus(error);
         return;
@@ -1431,6 +1489,8 @@ void MainWindow::ShowSpectrumAlignment() {
     options.alignmentModel = AlignmentModel();
     const auto match = CalibrationEngine::AlignSpectrumPatterns(*reference, *target, options);
     if (!match.success || !(match.scale > 0.0) || !std::isfinite(match.scale) || !std::isfinite(match.offset)) {
+        alignmentPreviewParameters_->setText(
+            "Alignment failed: not enough corresponding pattern peaks.");
         primaryPlot_->Clear("Alignment preview unavailable for " + previewName +
                             ": not enough corresponding peaks were found.");
         SetStatus("Could not align " + previewName +
@@ -1459,6 +1519,17 @@ void MainWindow::ShowSpectrumAlignment() {
                           "Reference-spectrum charge", "Normalized counts",
                           {std::move(referenceSeries), std::move(targetSeries)}, std::move(markers));
     const int matched = static_cast<int>(std::count(match.matched.begin(), match.matched.end(), true));
+    alignmentPreviewParameters_->setText(Text(
+        std::string(match.quadraticModel ? "Quadratic" : "Affine") +
+        " parameters (select to copy): a0=" + FormatPrecise(match.offset) +
+        ", a1=" + FormatPrecise(match.scale) +
+        ", a2=" + FormatPrecise(match.quadratic) +
+        "; cost=" + FormatNumber(match.alignmentCost, 4) +
+        "; matched=" + std::to_string(matched) + "/" +
+        std::to_string(match.referenceCharges.size()) +
+        "; sensitivity R/T=" +
+        FormatNumber(100.0 * match.referenceSensitivity, 1) + "%/" +
+        FormatNumber(100.0 * match.targetSensitivity, 1) + "%"));
     SetStatus("Alignment preview for " + previewName + ": " +
               std::to_string(matched) + "/" +
               std::to_string(match.referenceCharges.size()) + " pattern peaks; " +
@@ -1549,6 +1620,7 @@ void MainWindow::RefreshResults() {
     resultList_->setCurrentRow(selectedRow);
     updatingWidgets_ = false;
     UpdateManualCorrectionForSelection();
+    RefreshAlignmentParameterList();
     RefreshResultSpectrumChoices();
 }
 

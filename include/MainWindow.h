@@ -93,6 +93,7 @@ private:
     void AddReferencePeak(const PeakFitResult& fit);
     void AddManualPeak(const PeakFitResult& fit);
     void RefreshReferencePeakList();
+    void RefreshAlignmentParameterList();
     void RefreshFittedPointList();
     void RefreshManualPeakList();
     std::vector<CalibrationPoint> BuildPointsForCrystal(int crystal);
@@ -119,6 +120,7 @@ private:
     std::vector<ReferencePeak> referencePeaks_;
     std::vector<ManualPeak> manualPeaks_;
     std::map<int, CalibrationResult> results_;
+    std::map<std::pair<int, std::string>, PeakMatchResult> alignmentResults_;
     std::map<std::string, CombinedDatasetAnalysis> combinedAnalyses_;
     std::shared_ptr<TH1D> displayedSpectrum_;
     std::string displayedDatasetId_;
@@ -141,11 +143,14 @@ private:
     QDoubleSpinBox* thresholdEntry_ = nullptr;
     QDoubleSpinBox* residualLimitEntry_ = nullptr;
     QDoubleSpinBox* alignmentSensitivityEntry_ = nullptr;
+    QDoubleSpinBox* alignedFitHalfRangeEntry_ = nullptr;
     QCheckBox* autoTuneAlignmentEntry_ = nullptr;
     QComboBox* alignmentModelCombo_ = nullptr;
     QComboBox* alignmentHistogramCombo_ = nullptr;
     QSpinBox* alignmentCrystalEntry_ = nullptr;
+    QLabel* alignmentPreviewParameters_ = nullptr;
     QListWidget* resultList_ = nullptr;
+    QListWidget* alignmentParameterList_ = nullptr;
     QComboBox* resultSpectrumCombo_ = nullptr;
     QComboBox* combinedHistogramCombo_ = nullptr;
     QListWidget* combinedQualityList_ = nullptr;

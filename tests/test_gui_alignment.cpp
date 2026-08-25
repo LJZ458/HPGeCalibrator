@@ -2,6 +2,7 @@
 #include "SpectrumPlotWidget.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QLabel>
@@ -113,6 +114,70 @@ public:
             window.manualPeaks_.begin(), window.manualPeaks_.end(),
             [crystal](const MainWindow::ManualPeak& peak) { return peak.crystal == crystal; });
     }
+
+    static bool RunDirectAlignedRangeCalibration(MainWindow& window, int crystal,
+                                                 double halfRange) {
+        const auto referenceCharge = [](double energy) {
+            constexpr double p0 = -1.5;
+            constexpr double p1 = 0.68;
+            constexpr double p2 = 1.8e-5;
+            return (-p1 + std::sqrt(p1 * p1 - 4.0 * p2 * (p0 - energy))) /
+                   (2.0 * p2);
+        };
+        window.referenceCrystalEntry_->setValue(0);
+        window.histogramList_->selectAll();
+        window.alignedFitHalfRangeEntry_->setValue(halfRange);
+        window.referencePeaks_.clear();
+        for (const auto& descriptor : window.descriptors_) {
+            const bool co60 = descriptor.objectPath.find("co60") != std::string::npos;
+            const std::vector<double> energies = co60
+                ? std::vector<double>{1173.228, 1332.492}
+                : std::vector<double>{846.771, 1238.282, 1771.351, 2598.459};
+            for (double energy : energies) {
+                const double charge = referenceCharge(energy);
+                PeakFitResult fit;
+                fit.success = true;
+                fit.rangeLow = charge - 25.0;
+                fit.rangeHigh = charge + 25.0;
+                fit.centroid = charge;
+                fit.centroidError = 0.2;
+                fit.sigma = 4.0;
+                fit.height = 1000.0;
+                window.referencePeaks_.push_back(
+                    {descriptor.id, charge, energy, "test reference", fit});
+            }
+        }
+        window.results_.clear();
+        window.alignmentResults_.clear();
+        window.results_[crystal] = window.CalibrateCrystal(crystal);
+        const auto result = window.results_.find(crystal);
+        if (result == window.results_.end() ||
+            result->second.points.size() != window.referencePeaks_.size()) return false;
+        for (const auto& point : result->second.points) {
+            const auto alignment = window.alignmentResults_.find({crystal, point.datasetId});
+            const auto reference = std::find_if(
+                window.referencePeaks_.begin(), window.referencePeaks_.end(),
+                [&](const ReferencePeak& peak) {
+                    return peak.datasetId == point.datasetId &&
+                           std::abs(peak.energy - point.energy) < 1e-6;
+                });
+            if (alignment == window.alignmentResults_.end() ||
+                !alignment->second.success || reference == window.referencePeaks_.end()) {
+                return false;
+            }
+            double expectedLow = CalibrationEngine::MapReferenceCharge(
+                alignment->second, reference->peakFit.centroid - halfRange);
+            double expectedHigh = CalibrationEngine::MapReferenceCharge(
+                alignment->second, reference->peakFit.centroid + halfRange);
+            if (expectedHigh < expectedLow) std::swap(expectedLow, expectedHigh);
+            if (std::abs(point.peakFit.rangeLow - expectedLow) > 1e-9 ||
+                std::abs(point.peakFit.rangeHigh - expectedHigh) > 1e-9) {
+                return false;
+            }
+        }
+        window.RefreshResults();
+        return true;
+    }
 };
 
 } // namespace hpge
@@ -125,7 +190,8 @@ bool TestAlignmentPreview(hpge::MainWindow& window, QApplication& application) {
     auto* plot = dynamic_cast<hpge::SpectrumPlotWidget*>(
         window.findChild<QWidget*>("primaryPlot"));
     auto* status = window.findChild<QLabel*>("statusLabel");
-    if (!histogram || !preview || !plot || !status || histogram->count() < 2) {
+    auto* parameters = window.findChild<QLabel*>("alignmentPreviewParameters");
+    if (!histogram || !preview || !plot || !status || !parameters || histogram->count() < 2) {
         std::cerr << "Alignment preview controls or multiple histograms are missing\n";
         return false;
     }
@@ -161,7 +227,9 @@ bool TestAlignmentPreview(hpge::MainWindow& window, QApplication& application) {
         std::cerr << "The refreshed preview still contains the first histogram's data\n";
         return false;
     }
-    return true;
+    return parameters->text().contains("a0=") &&
+           parameters->text().contains("a1=") &&
+           parameters->text().contains("cost=");
 }
 
 bool TestMultipleSourceResultReview(hpge::MainWindow& window,
@@ -298,6 +366,41 @@ bool TestCustomPeakPersistence(hpge::MainWindow& window,
     return true;
 }
 
+bool TestDirectAlignedFitRange(hpge::MainWindow& window,
+                               QApplication& application) {
+    constexpr double halfRange = 18.0;
+    if (!hpge::MainWindowTestAccess::RunDirectAlignedRangeCalibration(
+            window, 3, halfRange)) {
+        std::cerr << "Automatic fit did not use the exact mapped alignment interval\n";
+        return false;
+    }
+    application.processEvents();
+    auto* range = window.findChild<QDoubleSpinBox*>("alignedFitHalfRangeEntry");
+    auto* parameters = window.findChild<QListWidget*>("alignmentParameterList");
+    auto* copy = window.findChild<QPushButton*>("copyAlignmentParametersButton");
+    if (!range || !parameters || !copy || std::abs(range->value() - halfRange) > 1e-12 ||
+        parameters->count() != 2) {
+        std::cerr << "Aligned fit-range or stored parameter controls are unavailable\n";
+        return false;
+    }
+    for (int row = 0; row < parameters->count(); ++row) {
+        const QString text = parameters->item(row)->text();
+        if (!text.contains("a0=") || !text.contains("a1=") || !text.contains("a2=") ||
+            !text.contains("cost=") || !text.contains("matched=")) {
+            std::cerr << "Stored alignment row omits accessible parameters\n";
+            return false;
+        }
+    }
+    parameters->setCurrentRow(1);
+    copy->click();
+    application.processEvents();
+    if (QApplication::clipboard()->text() != parameters->currentItem()->text()) {
+        std::cerr << "Alignment parameters were not copied to the clipboard\n";
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -332,9 +435,12 @@ int main(int argc, char** argv) {
                 ? TestSelectivePeakRefit(window, application)
                 : mode == "custom-peak-persistence"
                     ? TestCustomPeakPersistence(window, application)
-                    : false;
+                    : mode == "direct-aligned-fit"
+                        ? TestDirectAlignedFitRange(window, application)
+                        : false;
     if (!passed && mode != "alignment-preview" && mode != "result-review" &&
-        mode != "selective-refit" && mode != "custom-peak-persistence") {
+        mode != "selective-refit" && mode != "custom-peak-persistence" &&
+        mode != "direct-aligned-fit") {
         std::cerr << "Unknown GUI test mode: " << mode << '\n';
         return 2;
     }
