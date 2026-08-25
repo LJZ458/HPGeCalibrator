@@ -60,7 +60,7 @@ if(BUILD_TESTING)
             radware-peak-fit
             radware-fit-validation
             mapped-radware-fit
-            corresponding-peaks-without-alignment
+            alignment-constrained-correspondence
             spectrum-alignment
             two-peak-pattern-alignment
             co56-crystal-pattern-alignment

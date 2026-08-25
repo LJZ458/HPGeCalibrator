@@ -251,36 +251,44 @@ bool TestMappedRadwareFit() {
     return true;
 }
 
-bool TestCorrespondingPeaksWithoutAlignment() {
-    const std::vector<double> assigned{520.0, 1010.0, 1770.0, 2900.0};
-    const double expectedScale = 1.09;
-    const double expectedOffset = 37.0;
-    auto unrelatedReference = MakeVariableIntensitySpectrum(
-        "unrelated_alignment_reference", {260.0, 3650.0}, {900.0, 700.0},
-        1.0, 0.0);
+bool TestAlignmentConstrainedCorrespondence() {
+    const std::vector<double> pattern{420.0, 780.0, 1210.0, 1740.0, 2380.0, 3190.0};
+    const std::vector<double> assigned{780.0, 1740.0, 3190.0};
+    const double expectedScale = 1.07;
+    const double expectedOffset = 29.0;
+    const double expectedQuadratic = 1.4e-5;
+    auto reference = MakeVariableIntensitySpectrum(
+        "constrained_correspondence_reference", pattern,
+        {950.0, 260.0, 780.0, 330.0, 620.0, 410.0}, 1.0, 0.0);
+    // These three contaminants form a tempting identity-mapped copy of the
+    // selected subset. The full six-peak pattern identifies the transformed
+    // photopeaks and must override that locally plausible but wrong solution.
     auto target = MakeVariableIntensitySpectrum(
-        "correspondence_target", assigned, {120.0, 65.0, 95.0, 55.0},
-        expectedScale, expectedOffset, {410.0, 3520.0});
+        "constrained_correspondence_target", pattern,
+        {250.0, 980.0, 310.0, 760.0, 390.0, 680.0},
+        expectedScale, expectedOffset, assigned, expectedQuadratic);
     hpge::CalibrationEngine::SearchOptions options;
     options.alignmentSensitivity = 0.55;
     const auto match = hpge::CalibrationEngine::FindCorrespondingPeaks(
-        unrelatedReference, target, assigned, options);
+        reference, target, assigned, options);
     if (!match.success) {
-        std::cerr << "Independent corresponding-peak search failed\n";
+        std::cerr << "Alignment-constrained corresponding-peak search failed\n";
         return false;
     }
     for (std::size_t index = 0; index < assigned.size(); ++index) {
+        const double expected = expectedOffset + expectedScale * assigned[index] +
+                                expectedQuadratic * assigned[index] * assigned[index];
         if (!match.matched[index] ||
-            !Near(match.charges[index], expectedOffset + expectedScale * assigned[index],
-                  3.0, "independent corresponding peak")) {
+            !Near(match.charges[index], expected, 3.0,
+                  "alignment-constrained corresponding peak")) {
             return false;
         }
         const auto fit = hpge::CalibrationEngine::FitRadwarePeak(
             target, match.charges[index] - 30.0, match.charges[index] + 30.0);
         if (!fit.success ||
-            !Near(fit.centroid, expectedOffset + expectedScale * assigned[index],
-                  1.0, "recentered corresponding-peak fit")) {
-            std::cerr << "Corresponding candidate was not suitable for recentered fitting\n";
+            !Near(fit.centroid, expected, 1.0,
+                  "aligned corresponding-peak fit")) {
+            std::cerr << "Aligned candidate was not suitable for recentered fitting\n";
             return false;
         }
     }
@@ -615,7 +623,7 @@ int main(int argc, char** argv) {
     else if (test == "radware-peak-fit") passed = TestRadwarePeakFit();
     else if (test == "radware-fit-validation") passed = TestRadwareFitValidation();
     else if (test == "mapped-radware-fit") passed = TestMappedRadwareFit();
-    else if (test == "corresponding-peaks-without-alignment") passed = TestCorrespondingPeaksWithoutAlignment();
+    else if (test == "alignment-constrained-correspondence") passed = TestAlignmentConstrainedCorrespondence();
     else if (test == "spectrum-alignment") passed = TestSpectrumAlignment();
     else if (test == "two-peak-pattern-alignment") passed = TestTwoPeakPatternAlignment();
     else if (test == "co56-crystal-pattern-alignment") passed = TestCo56CrystalPatternAlignment();

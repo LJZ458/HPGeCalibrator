@@ -1353,7 +1353,9 @@ void MainWindow::ShowSpectrumAlignment() {
               (match.quadraticModel ? "2nd-order polynomial" : "affine") +
               " mapping; tuned sensitivity R/T " +
               FormatNumber(100.0 * match.referenceSensitivity, 0) + "%/" +
-              FormatNumber(100.0 * match.targetSensitivity, 0) + "%; target charge = " +
+              FormatNumber(100.0 * match.targetSensitivity, 0) +
+              "%; minimized pattern cost " + FormatNumber(match.alignmentCost, 3) +
+              "; target charge = " +
               FormatNumber(match.offset, 3) + " + " + FormatNumber(match.scale, 6) + " q + " +
               FormatNumber(match.quadratic, 9) + " q^2. No energy calibration applied.");
 }

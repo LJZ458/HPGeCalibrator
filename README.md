@@ -19,11 +19,12 @@ The application runs on macOS and Linux with Qt 6 and a CERN ROOT installation. 
 - Fits each selected interval with a RadWare/GF3-style Gaussian, low-energy tail, smoothed step, and quadratic background model; calibration uses the fitted centroid and uncertainty.
 - Draws each fitted peak curve and centroid in red, without covering the spectrum with a selected-range band.
 - Lists every source histogram that contributed fitted peaks to a selected crystal result. Review can show one source with its stored red fit curves or a vertically stacked, normalized overlay of all fitted source spectra and curves.
-- Finds peak patterns independently in the reference and target spectra, without using the user-assigned energy lines or relative peak intensities. Missing peaks and additional contaminant peaks are tolerated.
-- Treats spectrum alignment only as a correspondence hint. For calibration, the assigned reference charges are independently matched against target-spectrum peak candidates; if alignment is inaccurate or fails, reference-peak spacing provides the fallback. Each RadWare fit interval is recentered on the detected target peak and retried with a wider window if necessary.
+- Finds peak patterns independently in the reference and target spectra, without using relative peak intensities. Missing peaks and additional contaminant peaks are tolerated.
+- Selects the best full-spectrum alignment by minimizing a one-to-one ordered peak-pattern cost. The cost includes squared positional mismatch plus separate penalties for missing reference lines, extra target lines, extreme gain/offset, and excessive curvature, so a locally plausible subset cannot override the complete spectrum pattern.
+- Determines calibration peaks only near the positions predicted by the minimized affine or quadratic alignment; there is no independent subset-matching fallback. Each RadWare fit interval is recentered on the aligned target candidate and retried with a wider window if necessary.
 - Provides a continuous 0–100% alignment-peak sensitivity. Optional auto-tuning adjusts it independently for every reference and target crystal spectrum using that projection's count level, dynamic range, and isolated-spike content.
 - Uses square-root-compressed peak discovery and spatially balanced candidate limits so intense low-energy X-rays cannot hide weaker gamma lines or consume the alignment pattern. When at least three higher-charge candidates exist, auto-tuning excludes the lowest 7% of the charge axis from alignment only; original spectra and peak fits are unchanged.
-- Seeds alignment from peak spacings, then refines a monotonic second-order charge mapping for broad sources such as Co-56; two-line Co-60 alignment remains affine.
+- Seeds alignment from peak spacings, minimizes the global assignment, then refines the winning monotonic second-order charge mapping for broad sources such as Co-56; two-line Co-60 alignment remains affine.
 - Allows the alignment mapping to be selected explicitly as affine, second-order polynomial, or automatic. The second-order alignment is `target charge = a0 + a1*q + a2*q*q`; its seeding uses a broad provisional correspondence followed by tight iterative rematching and curvature regularization.
 - Refreshes the alignment plot immediately when another TH2 histogram is selected, includes the ROOT dataset name in the title and status, and clears stale plot data if the newly selected histogram cannot be aligned.
 - Previews the pattern mapping before calibration by overlaying normalized spectra in a common reference-charge coordinate.
@@ -77,7 +78,7 @@ ctest --test-dir build --output-on-failure
 
 The test suite reports thirty-one focused checks separately: peak discovery and refinement,
 single- and multi-peak mapping, RadWare peak fitting and validation, mapped interval fitting,
-corresponding-peak identification with an unusable alignment preview,
+alignment-constrained peak identification that rejects a locally convincing contaminant pattern,
 intensity-independent and two-line pattern alignment, wide-range Co-56 crystal alignment,
 low-statistics spike rejection, continuous per-spectrum sensitivity tuning, quadratic alignment
 in the presence of dominant low-energy X-rays, multi-histogram alignment-preview refresh,

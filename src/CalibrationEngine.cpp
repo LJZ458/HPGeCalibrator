@@ -391,33 +391,94 @@ PeakMatchResult EvaluatePatternTransform(const std::vector<double>& reference,
     result.scale = scale;
     result.offset = offset;
     result.quadratic = quadratic;
-    int matchedCount = 0;
-    double normalizedError = 0.0;
-    double firstMatchedReference = 0.0;
-    double lastMatchedReference = 0.0;
-    for (std::size_t index = 0; index < reference.size(); ++index) {
-        const double expected = offset + scale * reference[index] +
-                                quadratic * reference[index] * reference[index];
-        bool found = false;
-        const double matched = NearestCandidate(target, expected, tolerance, found);
-        if (!found) continue;
-        result.charges[index] = matched;
-        result.matched[index] = true;
-        normalizedError += std::abs(matched - expected) / tolerance;
-        if (matchedCount == 0) firstMatchedReference = reference[index];
-        lastMatchedReference = reference[index];
-        ++matchedCount;
+    if (reference.empty() || target.empty() || !(tolerance > 0.0)) return result;
+
+    // Minimize a one-to-one, order-preserving peak-pattern assignment.  A
+    // missing reference line is more expensive than an extra target line,
+    // because efficiencies can hide photopeaks while contaminants can add
+    // unrelated ones.  This prevents two reference peaks from collapsing onto
+    // the same target candidate and rejects attractive but incomplete subsets.
+    struct AlignmentCell {
+        double cost = std::numeric_limits<double>::infinity();
+        int matches = -1;
+        unsigned char action = 0;
+    };
+    constexpr double missingReferencePenalty = 6.25;
+    constexpr double extraTargetPenalty = 1.0;
+    const std::size_t columns = target.size() + 1;
+    std::vector<AlignmentCell> cells((reference.size() + 1) * columns);
+    const auto cell = [&](std::size_t referenceIndex, std::size_t targetIndex)
+        -> AlignmentCell& {
+        return cells[referenceIndex * columns + targetIndex];
+    };
+    const auto update = [](AlignmentCell& destination, double cost, int matches,
+                           unsigned char action) {
+        constexpr double epsilon = 1e-12;
+        if (cost < destination.cost - epsilon ||
+            (std::abs(cost - destination.cost) <= epsilon &&
+             matches > destination.matches)) {
+            destination.cost = cost;
+            destination.matches = matches;
+            destination.action = action;
+        }
+    };
+    cell(0, 0) = {0.0, 0, 0};
+    for (std::size_t referenceIndex = 0; referenceIndex <= reference.size();
+         ++referenceIndex) {
+        for (std::size_t targetIndex = 0; targetIndex <= target.size(); ++targetIndex) {
+            const auto current = cell(referenceIndex, targetIndex);
+            if (!std::isfinite(current.cost)) continue;
+            if (referenceIndex < reference.size()) {
+                update(cell(referenceIndex + 1, targetIndex),
+                       current.cost + missingReferencePenalty,
+                       current.matches, 1);
+            }
+            if (targetIndex < target.size()) {
+                update(cell(referenceIndex, targetIndex + 1),
+                       current.cost + extraTargetPenalty,
+                       current.matches, 2);
+            }
+            if (referenceIndex < reference.size() && targetIndex < target.size()) {
+                const double referenceCharge = reference[referenceIndex];
+                const double expected = offset + scale * referenceCharge +
+                    quadratic * referenceCharge * referenceCharge;
+                const double normalizedDistance =
+                    std::abs(target[targetIndex] - expected) / tolerance;
+                if (normalizedDistance <= 3.0) {
+                    update(cell(referenceIndex + 1, targetIndex + 1),
+                           current.cost + normalizedDistance * normalizedDistance,
+                           current.matches + 1, 3);
+                }
+            }
+        }
     }
+
+    std::size_t referenceIndex = reference.size();
+    std::size_t targetIndex = target.size();
+    while (referenceIndex > 0 || targetIndex > 0) {
+        const unsigned char action = cell(referenceIndex, targetIndex).action;
+        if (action == 3 && referenceIndex > 0 && targetIndex > 0) {
+            --referenceIndex;
+            --targetIndex;
+            result.charges[referenceIndex] = target[targetIndex];
+            result.matched[referenceIndex] = true;
+        } else if (action == 1 && referenceIndex > 0) {
+            --referenceIndex;
+        } else if (action == 2 && targetIndex > 0) {
+            --targetIndex;
+        } else {
+            break;
+        }
+    }
+    const int matchedCount = cell(reference.size(), target.size()).matches;
     const double referenceSpan = reference.size() > 1
         ? std::max(reference.back() - reference.front(), tolerance)
         : tolerance;
-    const double coverage = matchedCount > 1
-        ? (lastMatchedReference - firstMatchedReference) / referenceSpan
-        : 0.0;
-    result.score = 100.0 * matchedCount + 25.0 * coverage - normalizedError -
-                   2.0 * std::abs(std::log(scale)) -
-                   0.25 * std::abs(offset) / referenceSpan -
-                   30.0 * std::abs(quadratic) * referenceSpan / std::max(scale, 1e-9);
+    result.alignmentCost = cell(reference.size(), target.size()).cost +
+        2.0 * std::abs(std::log(scale)) +
+        0.25 * std::abs(offset) / referenceSpan +
+        30.0 * std::abs(quadratic) * referenceSpan / std::max(scale, 1e-9);
+    result.score = -result.alignmentCost;
     result.success = matchedCount >= 2;
     return result;
 }
@@ -804,53 +865,42 @@ PeakMatchResult CalibrationEngine::FindCorrespondingPeaks(
     // User-assigned low-energy peaks remain eligible here. The alignment-only
     // X-ray suppression must not remove a line explicitly chosen for calibration.
     candidateOptions.suppressLowEnergyAlignmentCandidates = false;
+    const auto alignment = AlignSpectrumPatterns(reference, target, options);
+    if (!alignment.success) return empty;
+
     const auto targetPattern = StrongPatternCandidates(target, candidateOptions);
     const auto& targetCandidates = targetPattern.charges;
     if (targetCandidates.empty()) return empty;
 
-    const auto direct = MatchReferencePeaks(target, referenceCharges, candidateOptions);
-    const auto alignment = AlignSpectrumPatterns(reference, target, options);
-    if (!alignment.success) return direct;
-
-    std::vector<std::size_t> order(referenceCharges.size());
-    std::iota(order.begin(), order.end(), 0);
-    std::sort(order.begin(), order.end(), [&](std::size_t left, std::size_t right) {
-        return referenceCharges[left] < referenceCharges[right];
-    });
-    std::vector<double> sortedReference;
-    sortedReference.reserve(referenceCharges.size());
-    for (std::size_t index : order) sortedReference.push_back(referenceCharges[index]);
     const double targetRange = target.GetXaxis()->GetXmax() - target.GetXaxis()->GetXmin();
-    const double broadTolerance = std::max(
-        8.0 * target.GetXaxis()->GetBinWidth(1), 0.05 * targetRange);
-    auto assistedSorted = EvaluatePatternTransform(
-        sortedReference, targetCandidates, alignment.scale, alignment.offset,
-        alignment.quadratic, broadTolerance);
-    PeakMatchResult assisted;
-    assisted.referenceCharges = referenceCharges;
-    assisted.charges.assign(referenceCharges.size(), 0.0);
-    assisted.matched.assign(referenceCharges.size(), false);
-    assisted.scale = alignment.scale;
-    assisted.offset = alignment.offset;
-    assisted.quadratic = alignment.quadratic;
-    assisted.quadraticModel = alignment.quadraticModel;
-    assisted.referenceSensitivity = alignment.referenceSensitivity;
-    assisted.targetSensitivity = targetPattern.sensitivity;
-    assisted.score = assistedSorted.score;
-    for (std::size_t sortedIndex = 0; sortedIndex < order.size(); ++sortedIndex) {
-        const std::size_t originalIndex = order[sortedIndex];
-        assisted.charges[originalIndex] = assistedSorted.charges[sortedIndex];
-        assisted.matched[originalIndex] = assistedSorted.matched[sortedIndex];
+    const double localTolerance = std::max(
+        8.0 * target.GetXaxis()->GetBinWidth(1),
+        std::min(options.matchToleranceFraction, 0.012) * targetRange);
+    PeakMatchResult result;
+    result.referenceCharges = referenceCharges;
+    result.charges.assign(referenceCharges.size(), 0.0);
+    result.matched.assign(referenceCharges.size(), false);
+    result.scale = alignment.scale;
+    result.offset = alignment.offset;
+    result.quadratic = alignment.quadratic;
+    result.quadraticModel = alignment.quadraticModel;
+    result.referenceSensitivity = alignment.referenceSensitivity;
+    result.targetSensitivity = targetPattern.sensitivity;
+    result.score = alignment.score;
+    result.alignmentCost = alignment.alignmentCost;
+    int matchedCount = 0;
+    for (std::size_t index = 0; index < referenceCharges.size(); ++index) {
+        const double expected = MapReferenceCharge(alignment, referenceCharges[index]);
+        bool found = false;
+        const double matched = NearestCandidate(
+            targetCandidates, expected, localTolerance, found);
+        if (!found) continue;
+        result.charges[index] = matched;
+        result.matched[index] = true;
+        ++matchedCount;
     }
-    const int assistedCount = static_cast<int>(
-        std::count(assisted.matched.begin(), assisted.matched.end(), true));
-    const int directCount = static_cast<int>(
-        std::count(direct.matched.begin(), direct.matched.end(), true));
-    assisted.success = assistedCount >= (referenceCharges.size() == 1 ? 1 : 2);
-    // Equal coverage favors the alignment-assisted local search. A direct
-    // pattern match still wins whenever it identifies more assigned lines.
-    if (assisted.success && assistedCount >= directCount) return assisted;
-    return direct;
+    result.success = matchedCount >= (referenceCharges.size() == 1 ? 1 : 2);
+    return result;
 }
 
 PeakMatchResult CalibrationEngine::AlignSpectrumPatterns(
@@ -880,14 +930,14 @@ PeakMatchResult CalibrationEngine::AlignSpectrumPatterns(
     const bool considerQuadratic = options.alignmentModel != AlignmentModel::Affine;
     const int minimumQuadraticMatches =
         options.alignmentModel == AlignmentModel::Quadratic ? 3 : 4;
-    double bestScore = -std::numeric_limits<double>::infinity();
+    double bestCost = std::numeric_limits<double>::infinity();
     const auto consider = [&](PeakMatchResult trial, bool quadraticModel,
-                              double& currentBestScore, PeakMatchResult& currentBest) {
-        if (!trial.success || trial.score <= currentBestScore) return;
+                              double& currentBestCost, PeakMatchResult& currentBest) {
+        if (!trial.success || trial.alignmentCost >= currentBestCost) return;
         trial.referenceSensitivity = referencePattern.sensitivity;
         trial.targetSensitivity = targetPattern.sensitivity;
         trial.quadraticModel = quadraticModel;
-        currentBestScore = trial.score;
+        currentBestCost = trial.alignmentCost;
         currentBest = std::move(trial);
     };
     for (std::size_t referenceLow = 0; referenceLow + 1 < referenceCandidates.size();
@@ -910,7 +960,7 @@ PeakMatchResult CalibrationEngine::AlignSpectrumPatterns(
                         consider(EvaluatePatternTransform(
                                      referenceCandidates, targetCandidates,
                                      scale, offset, 0.0, tolerance),
-                                 false, bestScore, best);
+                                 false, bestCost, best);
                     }
                     if (considerQuadratic) {
                         auto broad = EvaluatePatternTransform(
@@ -929,7 +979,7 @@ PeakMatchResult CalibrationEngine::AlignSpectrumPatterns(
                         consider(EvaluatePatternTransform(
                                      referenceCandidates, targetCandidates, quadraticScale,
                                      quadraticOffset, quadratic, tolerance),
-                                 true, bestScore, best);
+                                 true, bestCost, best);
                     }
                 }
             }
@@ -949,6 +999,7 @@ PeakMatchResult CalibrationEngine::AlignSpectrumPatterns(
         refined.referenceSensitivity = referencePattern.sensitivity;
         refined.targetSensitivity = targetPattern.sensitivity;
         refined.quadraticModel = best.quadraticModel;
+        if (refined.alignmentCost > best.alignmentCost + 1e-9) break;
         best = std::move(refined);
     }
     const int matchedCount = static_cast<int>(
