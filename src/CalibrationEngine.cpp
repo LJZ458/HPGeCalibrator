@@ -362,7 +362,8 @@ PatternCandidateSet StrongPatternCandidates(
         accepted.begin(), accepted.end(), [lowEnergyBoundary](const CandidateQuality& candidate) {
             return candidate.charge >= lowEnergyBoundary;
         }));
-    const bool suppressLowEnergyCluster = options.autoTuneAlignmentSensitivity &&
+    const bool suppressLowEnergyCluster = options.suppressLowEnergyAlignmentCandidates &&
+                                          options.autoTuneAlignmentSensitivity &&
                                           candidatesAboveLowEnergy >= 3;
     constexpr int regionCount = 10;
     constexpr std::size_t perRegionLimit = 2;
@@ -709,7 +710,8 @@ PeakMatchResult CalibrationEngine::MatchReferencePeaks(
     result.matched.assign(referenceCharges.size(), false);
     if (referenceCharges.empty()) return result;
 
-    auto candidates = FindPeakCandidates(target, options);
+    auto candidates = StrongPatternCandidates(target, options).charges;
+    if (candidates.empty()) candidates = FindPeakCandidates(target, options);
     if (candidates.empty()) return result;
 
     const double targetRange = target.GetXaxis()->GetXmax() - target.GetXaxis()->GetXmin();
@@ -786,6 +788,69 @@ PeakMatchResult CalibrationEngine::MatchReferencePeaks(
     result.offset = bestOffset;
     result.score = bestScore;
     return result;
+}
+
+PeakMatchResult CalibrationEngine::FindCorrespondingPeaks(
+    const TH1& reference, const TH1& target,
+    const std::vector<double>& referenceCharges,
+    const SearchOptions& options) {
+    PeakMatchResult empty;
+    empty.referenceCharges = referenceCharges;
+    empty.charges.assign(referenceCharges.size(), 0.0);
+    empty.matched.assign(referenceCharges.size(), false);
+    if (referenceCharges.empty()) return empty;
+
+    auto candidateOptions = options;
+    // User-assigned low-energy peaks remain eligible here. The alignment-only
+    // X-ray suppression must not remove a line explicitly chosen for calibration.
+    candidateOptions.suppressLowEnergyAlignmentCandidates = false;
+    const auto targetPattern = StrongPatternCandidates(target, candidateOptions);
+    const auto& targetCandidates = targetPattern.charges;
+    if (targetCandidates.empty()) return empty;
+
+    const auto direct = MatchReferencePeaks(target, referenceCharges, candidateOptions);
+    const auto alignment = AlignSpectrumPatterns(reference, target, options);
+    if (!alignment.success) return direct;
+
+    std::vector<std::size_t> order(referenceCharges.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](std::size_t left, std::size_t right) {
+        return referenceCharges[left] < referenceCharges[right];
+    });
+    std::vector<double> sortedReference;
+    sortedReference.reserve(referenceCharges.size());
+    for (std::size_t index : order) sortedReference.push_back(referenceCharges[index]);
+    const double targetRange = target.GetXaxis()->GetXmax() - target.GetXaxis()->GetXmin();
+    const double broadTolerance = std::max(
+        8.0 * target.GetXaxis()->GetBinWidth(1), 0.05 * targetRange);
+    auto assistedSorted = EvaluatePatternTransform(
+        sortedReference, targetCandidates, alignment.scale, alignment.offset,
+        alignment.quadratic, broadTolerance);
+    PeakMatchResult assisted;
+    assisted.referenceCharges = referenceCharges;
+    assisted.charges.assign(referenceCharges.size(), 0.0);
+    assisted.matched.assign(referenceCharges.size(), false);
+    assisted.scale = alignment.scale;
+    assisted.offset = alignment.offset;
+    assisted.quadratic = alignment.quadratic;
+    assisted.quadraticModel = alignment.quadraticModel;
+    assisted.referenceSensitivity = alignment.referenceSensitivity;
+    assisted.targetSensitivity = targetPattern.sensitivity;
+    assisted.score = assistedSorted.score;
+    for (std::size_t sortedIndex = 0; sortedIndex < order.size(); ++sortedIndex) {
+        const std::size_t originalIndex = order[sortedIndex];
+        assisted.charges[originalIndex] = assistedSorted.charges[sortedIndex];
+        assisted.matched[originalIndex] = assistedSorted.matched[sortedIndex];
+    }
+    const int assistedCount = static_cast<int>(
+        std::count(assisted.matched.begin(), assisted.matched.end(), true));
+    const int directCount = static_cast<int>(
+        std::count(direct.matched.begin(), direct.matched.end(), true));
+    assisted.success = assistedCount >= (referenceCharges.size() == 1 ? 1 : 2);
+    // Equal coverage favors the alignment-assisted local search. A direct
+    // pattern match still wins whenever it identifies more assigned lines.
+    if (assisted.success && assistedCount >= directCount) return assisted;
+    return direct;
 }
 
 PeakMatchResult CalibrationEngine::AlignSpectrumPatterns(

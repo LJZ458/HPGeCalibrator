@@ -421,15 +421,22 @@ QWidget* MainWindow::BuildCalibrationTab() {
     manualSourceCombo_ = new QComboBox;
     manualEnergyList_ = new QListWidget;
     manualEnergyList_->setMaximumHeight(90);
+    fittedPointList_ = new QListWidget;
+    fittedPointList_->setObjectName("fittedPointList");
+    fittedPointList_->setMaximumHeight(125);
     manualPeakList_ = new QListWidget;
     manualPeakList_->setMaximumHeight(90);
+    manualLayout->addWidget(new QLabel(
+        "Existing fitted peaks — select one to replace, or choose another energy to add"));
+    manualLayout->addWidget(fittedPointList_);
     manualLayout->addWidget(manualHistogramCombo_);
     manualLayout->addWidget(manualSourceCombo_);
     manualLayout->addWidget(manualEnergyList_);
-    manualLayout->addWidget(new QLabel("Manual peak overrides"));
+    manualLayout->addWidget(new QLabel("Pending peak replacements / additions"));
     manualLayout->addWidget(manualPeakList_);
     auto* remove = new QPushButton("Remove point");
-    auto* refit = new QPushButton("Refit crystal");
+    auto* refit = new QPushButton("Apply pending peaks (keep all others)");
+    refit->setObjectName("applySelectiveRefitButton");
     connect(remove, &QPushButton::clicked, this, [this] {
         const int selected = manualPeakList_->currentRow();
         const int crystal = CurrentResultCrystal();
@@ -471,6 +478,38 @@ void MainWindow::ConnectActions() {
         const auto* descriptor = DescriptorForCombo(manualHistogramCombo_);
         const int crystal = CurrentResultCrystal();
         if (descriptor && crystal >= 0) ShowCrystalSpectrum(crystal, *descriptor);
+    });
+    connect(fittedPointList_, &QListWidget::currentRowChanged, this, [this](int row) {
+        if (updatingWidgets_ || row < 0) return;
+        const int crystal = CurrentResultCrystal();
+        const auto result = results_.find(crystal);
+        const auto* item = fittedPointList_->item(row);
+        const int pointIndex = item ? item->data(Qt::UserRole).toInt() : -1;
+        if (result == results_.end() || pointIndex < 0 ||
+            pointIndex >= static_cast<int>(result->second.points.size())) return;
+        const auto& point = result->second.points[pointIndex];
+        const auto descriptor = std::find_if(
+            descriptors_.begin(), descriptors_.end(), [&](const HistogramDescriptor& value) {
+                return value.id == point.datasetId;
+            });
+        if (descriptor == descriptors_.end()) return;
+        const int descriptorIndex = static_cast<int>(std::distance(descriptors_.begin(), descriptor));
+        const auto line = std::find_if(energyLines_.begin(), energyLines_.end(),
+            [&](const EnergyLine& value) { return std::abs(value.energy - point.energy) < 1e-6; });
+        updatingWidgets_ = true;
+        manualHistogramCombo_->setCurrentIndex(descriptorIndex);
+        if (line != energyLines_.end()) manualSourceCombo_->setCurrentText(Text(line->source));
+        updatingWidgets_ = false;
+        RefreshEnergyList(manualEnergyList_, manualSourceCombo_, manualEnergyIndices_);
+        for (int energyRow = 0; energyRow < static_cast<int>(manualEnergyIndices_.size()); ++energyRow) {
+            if (std::abs(energyLines_[manualEnergyIndices_[energyRow]].energy - point.energy) < 1e-6) {
+                manualEnergyList_->setCurrentRow(energyRow);
+                break;
+            }
+        }
+        ShowCrystalSpectrum(crystal, *descriptor);
+        SetStatus("Selected fitted peak " + FormatNumber(point.energy, 3) +
+                  " keV for replacement. Select a new fit range, or choose another energy to add.");
     });
     connect(combinedHistogramCombo_, &QComboBox::currentIndexChanged, this, [this] {
         if (!updatingWidgets_) RefreshCombinedQualityList();
@@ -816,6 +855,7 @@ void MainWindow::UpdateManualCorrectionForSelection() {
         ? QString("Manual correction — Crystal %1 only").arg(crystal, 2, 10, QChar('0'))
         : QString("Manual correction — select one calibration result"));
     pendingRangeStart_.reset();
+    RefreshFittedPointList();
     RefreshManualPeakList();
 }
 
@@ -944,7 +984,16 @@ void MainWindow::AddManualPeak(const PeakFitResult& fit) {
     else *duplicate = std::move(peak);
     RefreshManualPeakList();
     RedrawDisplayedSpectrum();
-    SetStatus("Manual RadWare centroid fitted. Click Refit crystal to apply it.");
+    const auto result = results_.find(crystal);
+    const bool replaces = result != results_.end() && std::any_of(
+        result->second.points.begin(), result->second.points.end(),
+        [&](const CalibrationPoint& point) {
+            return point.datasetId == descriptor->id &&
+                   std::abs(point.energy - energy->energy) < 1e-6;
+        });
+    SetStatus(std::string("Manual RadWare centroid fitted as a pending ") +
+              (replaces ? "replacement" : "new peak") +
+              ". Apply pending peaks to recompute only the calibration polynomial.");
 }
 
 void MainWindow::RefreshReferencePeakList() {
@@ -958,6 +1007,33 @@ void MainWindow::RefreshReferencePeakList() {
             ", " + FormatNumber(peak.peakFit.rangeHigh, 2) + "] centroid " +
             FormatNumber(peak.charge, 3) + " +/- " + FormatNumber(peak.peakFit.centroidError, 3) +
             " -> " + FormatNumber(peak.energy, 3) + " keV (" + peak.label + ")"));
+    }
+}
+
+void MainWindow::RefreshFittedPointList() {
+    fittedPointList_->clear();
+    const int crystal = CurrentResultCrystal();
+    const auto result = results_.find(crystal);
+    if (result == results_.end()) return;
+    for (std::size_t index = 0; index < result->second.points.size(); ++index) {
+        const auto& point = result->second.points[index];
+        const auto descriptor = std::find_if(
+            descriptors_.begin(), descriptors_.end(), [&](const HistogramDescriptor& value) {
+                return value.id == point.datasetId;
+            });
+        const std::string dataset = descriptor == descriptors_.end()
+            ? point.datasetId : descriptor->displayName;
+        const std::string fitQuality = point.peakFit.ndf > 0
+            ? " chi2/ndf=" + FormatNumber(point.peakFit.chi2 /
+                                           static_cast<double>(point.peakFit.ndf), 2)
+            : "";
+        auto* item = new QListWidgetItem(Text(
+            (point.manual ? "[manual] " : "[auto] ") + dataset + " | " +
+            FormatNumber(point.energy, 3) + " keV | centroid " +
+            FormatNumber(point.charge, 3) + " +/- " +
+            FormatNumber(point.chargeError, 3) + fitQuality), fittedPointList_);
+        item->setData(Qt::UserRole, static_cast<int>(index));
+        item->setForeground(point.manual ? QColor("#b45309") : QColor("#15803d"));
     }
 }
 
@@ -999,12 +1075,32 @@ std::vector<CalibrationPoint> MainWindow::BuildPointsForCrystal(int crystal) {
         auto referenceSpectrum = repository_.ProjectCrystal(descriptor, ReferenceCrystal(), Orientation(), error);
         auto spectrum = repository_.ProjectCrystal(descriptor, crystal, Orientation(), error);
         if (!referenceSpectrum || !spectrum) continue;
-        const auto alignment = CalibrationEngine::AlignSpectrumPatterns(*referenceSpectrum, *spectrum, options);
-        if (!alignment.success) continue;
+        std::vector<double> referenceCharges;
+        referenceCharges.reserve(references.size());
         for (const auto& reference : references) {
-            const double low = CalibrationEngine::MapReferenceCharge(alignment, reference.peakFit.rangeLow);
-            const double high = CalibrationEngine::MapReferenceCharge(alignment, reference.peakFit.rangeHigh);
-            const auto fit = CalibrationEngine::FitRadwarePeak(*spectrum, low, high);
+            referenceCharges.push_back(reference.peakFit.centroid);
+        }
+        const auto correspondence = CalibrationEngine::FindCorrespondingPeaks(
+            *referenceSpectrum, *spectrum, referenceCharges, options);
+        for (std::size_t index = 0; index < references.size(); ++index) {
+            if (index >= correspondence.matched.size() || !correspondence.matched[index]) continue;
+            const auto& reference = references[index];
+            const double derivative = std::abs(
+                correspondence.scale + 2.0 * correspondence.quadratic * reference.peakFit.centroid);
+            const double mappedHalfWidth = 0.5 *
+                (reference.peakFit.rangeHigh - reference.peakFit.rangeLow) *
+                std::clamp(derivative, 0.5, 2.0);
+            const double minimumHalfWidth =
+                6.5 * spectrum->GetXaxis()->GetBinWidth(1);
+            const double halfWidth = std::max(1.15 * mappedHalfWidth, minimumHalfWidth);
+            const double candidate = correspondence.charges[index];
+            auto fit = CalibrationEngine::FitRadwarePeak(
+                *spectrum, candidate - halfWidth, candidate + halfWidth);
+            if (!fit.success) {
+                fit = CalibrationEngine::FitRadwarePeak(
+                    *spectrum, candidate - 1.75 * halfWidth,
+                    candidate + 1.75 * halfWidth);
+            }
             if (fit.success) {
                 points.push_back({descriptor.id, fit.centroid, reference.energy,
                                   fit.centroidError, false, 0.0, fit});
@@ -1264,11 +1360,40 @@ void MainWindow::ShowSpectrumAlignment() {
 
 void MainWindow::RefitSelectedCrystal() {
     const int crystal = CurrentResultCrystal();
-    if (crystal < 0) {
+    const auto existingResult = results_.find(crystal);
+    if (crystal < 0 || existingResult == results_.end()) {
         SetStatus("Select a calibration result to refit.");
         return;
     }
-    results_[crystal] = CalibrateCrystal(crystal);
+    std::vector<CalibrationPoint> points = existingResult->second.points;
+    int replaced = 0;
+    int added = 0;
+    for (const auto& manual : manualPeaks_) {
+        if (manual.crystal != crystal) continue;
+        const auto point = std::find_if(points.begin(), points.end(),
+            [&](const CalibrationPoint& value) {
+                return value.datasetId == manual.datasetId &&
+                       std::abs(value.energy - manual.energy) < 1e-6;
+            });
+        CalibrationPoint replacement{manual.datasetId, manual.peakFit.centroid,
+            manual.energy, manual.peakFit.centroidError, true, 0.0, manual.peakFit};
+        if (point == points.end()) {
+            points.push_back(std::move(replacement));
+            ++added;
+        } else {
+            *point = std::move(replacement);
+            ++replaced;
+        }
+    }
+    if (replaced + added == 0) {
+        SetStatus("No pending fitted peaks were selected. Existing peak fits were left unchanged.");
+        return;
+    }
+    results_[crystal] = CalibrationEngine::FitSecondOrder(
+        crystal, std::move(points), residualLimitEntry_->value());
+    manualPeaks_.erase(std::remove_if(manualPeaks_.begin(), manualPeaks_.end(),
+        [crystal](const ManualPeak& peak) { return peak.crystal == crystal; }),
+        manualPeaks_.end());
     RefreshResults();
     EvaluateCombinedSpectra();
     for (int row = 0; row < resultList_->count(); ++row) {
@@ -1277,9 +1402,14 @@ void MainWindow::RefitSelectedCrystal() {
             break;
         }
     }
+    RefreshFittedPointList();
+    RefreshManualPeakList();
     const auto* descriptor = DescriptorForCombo(manualHistogramCombo_);
     if (descriptor) ShowCrystalSpectrum(crystal, *descriptor);
-    SetStatus("Crystal " + std::to_string(crystal) + " refitted with manual overrides.");
+    SetStatus("Crystal " + std::to_string(crystal) + " calibration updated: " +
+              std::to_string(replaced) + " peak(s) replaced, " +
+              std::to_string(added) +
+              " added; every other fitted centroid and fit curve was preserved.");
 }
 
 void MainWindow::RefreshResults() {

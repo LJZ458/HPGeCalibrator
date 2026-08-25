@@ -20,6 +20,7 @@ The application runs on macOS and Linux with Qt 6 and a CERN ROOT installation. 
 - Draws each fitted peak curve and centroid in red, without covering the spectrum with a selected-range band.
 - Lists every source histogram that contributed fitted peaks to a selected crystal result. Review can show one source with its stored red fit curves or a vertically stacked, normalized overlay of all fitted source spectra and curves.
 - Finds peak patterns independently in the reference and target spectra, without using the user-assigned energy lines or relative peak intensities. Missing peaks and additional contaminant peaks are tolerated.
+- Treats spectrum alignment only as a correspondence hint. For calibration, the assigned reference charges are independently matched against target-spectrum peak candidates; if alignment is inaccurate or fails, reference-peak spacing provides the fallback. Each RadWare fit interval is recentered on the detected target peak and retried with a wider window if necessary.
 - Provides a continuous 0–100% alignment-peak sensitivity. Optional auto-tuning adjusts it independently for every reference and target crystal spectrum using that projection's count level, dynamic range, and isolated-spike content.
 - Uses square-root-compressed peak discovery and spatially balanced candidate limits so intense low-energy X-rays cannot hide weaker gamma lines or consume the alignment pattern. When at least three higher-charge candidates exist, auto-tuning excludes the lowest 7% of the charge axis from alignment only; original spectra and peak fits are unchanged.
 - Seeds alignment from peak spacings, then refines a monotonic second-order charge mapping for broad sources such as Co-56; two-line Co-60 alignment remains affine.
@@ -30,7 +31,8 @@ The application runs on macOS and Linux with Qt 6 and a CERN ROOT installation. 
 - Uses a custom Qt plot widget, so ROOT object selection, class/editor panels, and canvas callbacks cannot interrupt spectrum interaction.
 - Combines peak points from multiple source histograms into one quadratic fit per crystal.
 - Displays calibration curves and per-line residuals versus assigned peak energy, and flags high-RMS or exactly determined fits for review.
-- Lets the user replace any automatically matched point by selecting a new range in a problematic crystal and refitting it.
+- Lists every fitted dataset/energy/centroid for the selected crystal. Selecting a point prepares only that corresponding peak for replacement; selecting another known/custom energy adds a new point.
+- Applies pending replacements and additions to the existing point set without rerunning automatic peak finding or refitting untouched RadWare peaks. Only the second-order calibration polynomial and residuals are recomputed.
 - Binds manual corrections to the single crystal highlighted in the calibration-results list and labels the correction panel with that crystal number.
 - Extends calibration and residual plot axes beyond the outermost data points so the second-order trend and edge residuals have visual context.
 - After the individual fits, transforms and sums every successful crystal in energy space for each source, refits the combined peaks, and reports centroid residual, FWHM in keV, and percentage energy resolution.
@@ -73,12 +75,14 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-The test suite reports twenty-nine focused checks separately: peak discovery and refinement,
+The test suite reports thirty-one focused checks separately: peak discovery and refinement,
 single- and multi-peak mapping, RadWare peak fitting and validation, mapped interval fitting,
+corresponding-peak identification with an unusable alignment preview,
 intensity-independent and two-line pattern alignment, wide-range Co-56 crystal alignment,
 low-statistics spike rejection, continuous per-spectrum sensitivity tuning, quadratic alignment
 in the presence of dominant low-energy X-rays, multi-histogram alignment-preview refresh,
-multi-source fitted-spectrum result review, and
+multi-source fitted-spectrum result review, selective single-crystal peak replacement/addition,
+preservation of untouched fitted peaks, and
 alignment validation, quadratic fitting and validation, recursive histogram discovery/cache loading, both TH2 axis
 orientations, repeated multi-file projection/cache cycling, repository error handling, and sample
 ROOT-file generation, combined calibrated-spectrum/FWHM analysis, three-list C++ export,
@@ -119,7 +123,7 @@ If Qt reports that the `xcb` platform plugin cannot be initialized on a minimal 
 3. In **Calibration & review**, choose the starting peak sensitivity, charge-mapping model, histogram, and target crystal under **Pre-calibration spectrum alignment**, then click **Show aligned spectra**. Leave **Auto-tune for each crystal spectrum** enabled to adjust the sensitivity independently for each reference/target projection; disable it when you want the exact 0–100% value. Use **Auto — affine or 2nd order** normally, or force `a0 + a1*q` or the second-order polynomial `a0 + a1*q + a2*q*q`. Selecting another histogram refreshes the preview immediately; its dataset name appears in both the plot title and status. The blue reference and red target spectra are normalized and overlaid after independent peak-pattern mapping; no user-selected energy lines or peak intensities are used. The status bar reports the mapping model, effective reference/target sensitivities, matched-pattern count, and coefficients. This is intentionally a rough charge-axis diagnostic—every calibration peak is subsequently refitted, and no energy calibration is applied in the preview. These settings are also used by automatic calibration.
 4. Adjust peak-search parameters if necessary and calibrate the selected crystals. At least three total reference points are required for a quadratic fit; four or more provide a meaningful residual-based quality check.
 5. Select a calibration result. **Show all fitted sources** displays every contributing source spectrum as a normalized vertical stack with all fitted peak curves in red. Use the fitted-source selector or **Show selected source** to inspect one spectrum at full count scale.
-6. For any `REVIEW` or `FAIL` result, choose its source histogram and energy under Manual correction, show the spectrum, click the lower and upper limits around the correct peak, and press **Refit crystal**. A manual centroid replaces the automatic point for that dataset and energy. After refitting, the spectrum stays visible with the fitted peak overlays.
+6. For any `REVIEW` or `FAIL` result, inspect **Existing fitted peaks** under Manual correction. Selecting a row chooses its dataset and energy and opens that crystal spectrum for replacement. Select a new range to create a pending replacement, or choose another known/custom energy and range to add a point. Remove any unwanted pending item, then press **Apply pending peaks (keep all others)**. Untouched centroids and RadWare fits are preserved; only the calibration polynomial and residuals are recomputed.
 7. Inspect **Fit + residuals**; residual x coordinates are the assigned peak energies rather than charge centroids.
 8. Under **Combined calibrated spectrum quality**, select each source and inspect the summed energy spectrum, combined-line residuals, FWHM, and percentage resolution.
 9. Export the complete CSV. The same action also writes `<csv-name>_coefficients.hpp` with separate `p0`, `p1`, and `p2` C++ arrays for crystals 0–63; unfitted crystals contain a `missing` NaN placeholder.

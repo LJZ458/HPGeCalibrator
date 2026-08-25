@@ -251,6 +251,42 @@ bool TestMappedRadwareFit() {
     return true;
 }
 
+bool TestCorrespondingPeaksWithoutAlignment() {
+    const std::vector<double> assigned{520.0, 1010.0, 1770.0, 2900.0};
+    const double expectedScale = 1.09;
+    const double expectedOffset = 37.0;
+    auto unrelatedReference = MakeVariableIntensitySpectrum(
+        "unrelated_alignment_reference", {260.0, 3650.0}, {900.0, 700.0},
+        1.0, 0.0);
+    auto target = MakeVariableIntensitySpectrum(
+        "correspondence_target", assigned, {120.0, 65.0, 95.0, 55.0},
+        expectedScale, expectedOffset, {410.0, 3520.0});
+    hpge::CalibrationEngine::SearchOptions options;
+    options.alignmentSensitivity = 0.55;
+    const auto match = hpge::CalibrationEngine::FindCorrespondingPeaks(
+        unrelatedReference, target, assigned, options);
+    if (!match.success) {
+        std::cerr << "Independent corresponding-peak search failed\n";
+        return false;
+    }
+    for (std::size_t index = 0; index < assigned.size(); ++index) {
+        if (!match.matched[index] ||
+            !Near(match.charges[index], expectedOffset + expectedScale * assigned[index],
+                  3.0, "independent corresponding peak")) {
+            return false;
+        }
+        const auto fit = hpge::CalibrationEngine::FitRadwarePeak(
+            target, match.charges[index] - 30.0, match.charges[index] + 30.0);
+        if (!fit.success ||
+            !Near(fit.centroid, expectedOffset + expectedScale * assigned[index],
+                  1.0, "recentered corresponding-peak fit")) {
+            std::cerr << "Corresponding candidate was not suitable for recentered fitting\n";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool TestSpectrumAlignment() {
     const std::vector<double> peaks{470.0, 840.0, 1190.0, 1760.0, 2300.0, 3010.0};
     const double expectedScale = 1.075;
@@ -579,6 +615,7 @@ int main(int argc, char** argv) {
     else if (test == "radware-peak-fit") passed = TestRadwarePeakFit();
     else if (test == "radware-fit-validation") passed = TestRadwareFitValidation();
     else if (test == "mapped-radware-fit") passed = TestMappedRadwareFit();
+    else if (test == "corresponding-peaks-without-alignment") passed = TestCorrespondingPeaksWithoutAlignment();
     else if (test == "spectrum-alignment") passed = TestSpectrumAlignment();
     else if (test == "two-peak-pattern-alignment") passed = TestTwoPeakPatternAlignment();
     else if (test == "co56-crystal-pattern-alignment") passed = TestCo56CrystalPatternAlignment();

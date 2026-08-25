@@ -60,6 +60,7 @@ if(BUILD_TESTING)
             radware-peak-fit
             radware-fit-validation
             mapped-radware-fit
+            corresponding-peaks-without-alignment
             spectrum-alignment
             two-peak-pattern-alignment
             co56-crystal-pattern-alignment
@@ -130,6 +131,12 @@ if(BUILD_TESTING)
              COMMAND hpge-gui-alignment-tests
                      ${CMAKE_CURRENT_BINARY_DIR}/hpge_test_sample.root result-review)
     set_tests_properties(qt-result-multiple-source-spectrum-review PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        DEPENDS sample-generator)
+    add_test(NAME qt-selective-single-crystal-peak-refit
+             COMMAND hpge-gui-alignment-tests
+                     ${CMAKE_CURRENT_BINARY_DIR}/hpge_test_sample.root selective-refit)
+    set_tests_properties(qt-selective-single-crystal-peak-refit PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         DEPENDS sample-generator)
 endif()

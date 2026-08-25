@@ -24,6 +24,7 @@ public:
         double alignmentSensitivity = 0.35;
         bool autoTuneAlignmentSensitivity = true;
         AlignmentModel alignmentModel = AlignmentModel::Auto;
+        bool suppressLowEnergyAlignmentCandidates = true;
     };
 
     static std::vector<double> FindPeakCandidates(const TH1& histogram,
@@ -40,6 +41,11 @@ public:
     static PeakMatchResult MatchReferencePeaks(const TH1& target,
                                                const std::vector<double>& referenceCharges,
                                                const SearchOptions& options);
+
+    static PeakMatchResult FindCorrespondingPeaks(
+        const TH1& reference, const TH1& target,
+        const std::vector<double>& referenceCharges,
+        const SearchOptions& options);
 
     static PeakMatchResult AlignSpectrumPatterns(const TH1& reference,
                                                  const TH1& target,

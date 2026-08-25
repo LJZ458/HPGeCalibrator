@@ -87,6 +87,7 @@ private:
     void AddReferencePeak(const PeakFitResult& fit);
     void AddManualPeak(const PeakFitResult& fit);
     void RefreshReferencePeakList();
+    void RefreshFittedPointList();
     void RefreshManualPeakList();
     std::vector<CalibrationPoint> BuildPointsForCrystal(int crystal);
     CalibrationResult CalibrateCrystal(int crystal);
@@ -144,6 +145,7 @@ private:
     QComboBox* manualHistogramCombo_ = nullptr;
     QComboBox* manualSourceCombo_ = nullptr;
     QListWidget* manualEnergyList_ = nullptr;
+    QListWidget* fittedPointList_ = nullptr;
     QListWidget* manualPeakList_ = nullptr;
     QGroupBox* manualCorrectionGroup_ = nullptr;
     QComboBox* mouseModeCombo_ = nullptr;
