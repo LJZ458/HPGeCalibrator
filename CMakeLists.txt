@@ -139,6 +139,12 @@ if(BUILD_TESTING)
     set_tests_properties(qt-selective-single-crystal-peak-refit PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         DEPENDS sample-generator)
+    add_test(NAME qt-custom-peak-persistence
+             COMMAND hpge-gui-alignment-tests
+                     ${CMAKE_CURRENT_BINARY_DIR}/hpge_test_sample.root custom-peak-persistence)
+    set_tests_properties(qt-custom-peak-persistence PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        DEPENDS sample-generator)
 endif()
 
 install(TARGETS hpge-calibrator hpge-generate-sample RUNTIME DESTINATION bin)

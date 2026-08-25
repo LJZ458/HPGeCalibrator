@@ -18,6 +18,7 @@ class QCheckBox;
 class QDoubleSpinBox;
 class QGroupBox;
 class QLabel;
+class QLineEdit;
 class QListWidget;
 class QSpinBox;
 class QTabWidget;
@@ -41,6 +42,7 @@ private:
         double energy = 0.0;
         std::string label;
         std::string source;
+        bool saved = false;
     };
     struct ManualPeak {
         std::string datasetId;
@@ -63,6 +65,10 @@ private:
     QWidget* BuildCalibrationTab();
     void ConnectActions();
     void PopulateEnergyLines();
+    void LoadSavedCustomLines();
+    void SaveCustomLines() const;
+    void AddCustomLine(bool saveForFuture);
+    void RemoveSelectedCustomLine();
     void RefreshEnergyList(QListWidget* list, const QComboBox* sourceCombo,
                            std::vector<std::size_t>& indices);
     void AddRootFiles();
@@ -129,6 +135,7 @@ private:
     QComboBox* referenceSourceCombo_ = nullptr;
     QListWidget* energyList_ = nullptr;
     QDoubleSpinBox* customEnergyEntry_ = nullptr;
+    QLineEdit* customLabelEntry_ = nullptr;
     QListWidget* referencePeakList_ = nullptr;
     QDoubleSpinBox* sigmaEntry_ = nullptr;
     QDoubleSpinBox* thresholdEntry_ = nullptr;

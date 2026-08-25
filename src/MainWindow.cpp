@@ -12,10 +12,12 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QMenuBar>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSettings>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStatusBar>
@@ -288,29 +290,36 @@ QWidget* MainWindow::BuildPeaksTab() {
     layout->addWidget(show);
     layout->addWidget(new QLabel("Radioactive source"));
     referenceSourceCombo_ = new QComboBox;
+    referenceSourceCombo_->setObjectName("referenceSourceCombo");
     layout->addWidget(referenceSourceCombo_);
     layout->addWidget(new QLabel("Known line for the next fit"));
     energyList_ = new QListWidget;
+    energyList_->setObjectName("referenceEnergyList");
     energyList_->setMinimumHeight(150);
     layout->addWidget(energyList_);
 
+    layout->addWidget(new QLabel("Custom line"));
     customEnergyEntry_ = RealEntry(0.0, 3, 0.0, 100000.0);
+    customEnergyEntry_->setObjectName("customEnergyEntry");
     customEnergyEntry_->setSuffix(" keV");
-    auto* addCustom = new QPushButton("Add custom line");
-    connect(addCustom, &QPushButton::clicked, this, [this] {
-        const double energy = customEnergyEntry_->value();
-        if (energy <= 0.0) return;
-        energyLines_.push_back({energy, "user supplied", "Custom"});
-        PopulateEnergyLines();
-        referenceSourceCombo_->setCurrentText("Custom");
-        manualSourceCombo_->setCurrentText("Custom");
-        RefreshEnergyList(energyList_, referenceSourceCombo_, referenceEnergyIndices_);
-        RefreshEnergyList(manualEnergyList_, manualSourceCombo_, manualEnergyIndices_);
-        energyList_->setCurrentRow(energyList_->count() - 1);
-        manualEnergyList_->setCurrentRow(manualEnergyList_->count() - 1);
-        SetStatus("Added custom energy line " + FormatNumber(energy, 3) + " keV.");
-    });
-    layout->addWidget(Row({customEnergyEntry_, addCustom}));
+    customLabelEntry_ = new QLineEdit;
+    customLabelEntry_->setObjectName("customLineLabelEntry");
+    customLabelEntry_->setPlaceholderText("Optional label");
+    auto* addCustom = new QPushButton("Add for session");
+    addCustom->setObjectName("addCustomLineButton");
+    auto* saveCustom = new QPushButton("Save for future");
+    saveCustom->setObjectName("saveCustomLineButton");
+    auto* removeCustom = new QPushButton("Remove selected custom line");
+    removeCustom->setObjectName("removeCustomLineButton");
+    connect(addCustom, &QPushButton::clicked, this,
+            [this] { AddCustomLine(false); });
+    connect(saveCustom, &QPushButton::clicked, this,
+            [this] { AddCustomLine(true); });
+    connect(removeCustom, &QPushButton::clicked, this,
+            [this] { RemoveSelectedCustomLine(); });
+    layout->addWidget(Row({customEnergyEntry_, customLabelEntry_}));
+    layout->addWidget(Row({addCustom, saveCustom}));
+    layout->addWidget(removeCustom);
     layout->addWidget(new QLabel("Selected reference peaks"));
     referencePeakList_ = new QListWidget;
     referencePeakList_->setMinimumHeight(190);
@@ -546,6 +555,7 @@ void MainWindow::PopulateEnergyLines() {
             {1460.822, "K-40 background", "Background / contaminants"},
             {2614.511, "Tl-208 background", "Background / contaminants"}
         };
+        LoadSavedCustomLines();
     }
     energySources_ = {"Co-60", "Co-56", "Cs-137", "Na-22",
                       "Background / contaminants", "Custom"};
@@ -574,9 +584,111 @@ void MainWindow::RefreshEnergyList(QListWidget* list, const QComboBox* sourceCom
         const auto& line = energyLines_[index];
         if (line.source != source) continue;
         indices.push_back(index);
-        list->addItem(Text(FormatNumber(line.energy, 3) + " keV  —  " + line.label));
+        list->addItem(Text(FormatNumber(line.energy, 3) + " keV  —  " + line.label +
+                           (line.saved ? "  [saved]" : "")));
     }
     if (list->count() > 0) list->setCurrentRow(0);
+}
+
+void MainWindow::LoadSavedCustomLines() {
+    QSettings settings;
+    const int count = settings.beginReadArray("customPeaks");
+    for (int index = 0; index < count; ++index) {
+        settings.setArrayIndex(index);
+        const double energy = settings.value("energy").toDouble();
+        const std::string label = settings.value("label", "user supplied").toString()
+                                      .trimmed().toStdString();
+        if (!(energy > 0.0) || !std::isfinite(energy)) continue;
+        const bool duplicate = std::any_of(
+            energyLines_.begin(), energyLines_.end(), [&](const EnergyLine& line) {
+                return line.source == "Custom" && std::abs(line.energy - energy) < 1e-6;
+            });
+        if (!duplicate) {
+            energyLines_.push_back({energy, label.empty() ? "user supplied" : label,
+                                    "Custom", true});
+        }
+    }
+    settings.endArray();
+}
+
+void MainWindow::SaveCustomLines() const {
+    QSettings settings;
+    int savedCount = 0;
+    for (const auto& line : energyLines_) {
+        if (line.source == "Custom" && line.saved) ++savedCount;
+    }
+    settings.beginWriteArray("customPeaks", savedCount);
+    int savedIndex = 0;
+    for (const auto& line : energyLines_) {
+        if (line.source != "Custom" || !line.saved) continue;
+        settings.setArrayIndex(savedIndex++);
+        settings.setValue("energy", line.energy);
+        settings.setValue("label", Text(line.label));
+    }
+    settings.endArray();
+    settings.sync();
+}
+
+void MainWindow::AddCustomLine(bool saveForFuture) {
+    const double energy = customEnergyEntry_->value();
+    if (!(energy > 0.0) || !std::isfinite(energy)) {
+        SetStatus("Enter a positive custom peak energy first.");
+        return;
+    }
+    const QString enteredLabel = customLabelEntry_->text().trimmed();
+    const std::string label = enteredLabel.isEmpty()
+        ? "user supplied" : enteredLabel.toStdString();
+    auto existing = std::find_if(
+        energyLines_.begin(), energyLines_.end(), [&](const EnergyLine& line) {
+            return line.source == "Custom" && std::abs(line.energy - energy) < 1e-6;
+        });
+    if (existing == energyLines_.end()) {
+        energyLines_.push_back({energy, label, "Custom", saveForFuture});
+    } else if (saveForFuture || !existing->saved) {
+        existing->label = label;
+        existing->saved = existing->saved || saveForFuture;
+    }
+    if (saveForFuture) SaveCustomLines();
+    PopulateEnergyLines();
+    referenceSourceCombo_->setCurrentText("Custom");
+    manualSourceCombo_->setCurrentText("Custom");
+    RefreshEnergyList(energyList_, referenceSourceCombo_, referenceEnergyIndices_);
+    RefreshEnergyList(manualEnergyList_, manualSourceCombo_, manualEnergyIndices_);
+    for (int row = 0; row < static_cast<int>(referenceEnergyIndices_.size()); ++row) {
+        if (std::abs(energyLines_[referenceEnergyIndices_[row]].energy - energy) < 1e-6) {
+            energyList_->setCurrentRow(row);
+            manualEnergyList_->setCurrentRow(row);
+            break;
+        }
+    }
+    SetStatus(std::string(saveForFuture ? "Saved" : "Added") +
+              " custom energy line " + FormatNumber(energy, 3) + " keV" +
+              (saveForFuture ? " for future sessions." : " for this session."));
+}
+
+void MainWindow::RemoveSelectedCustomLine() {
+    if (referenceSourceCombo_->currentText() != "Custom") {
+        SetStatus("Select the Custom source and a custom line to remove.");
+        return;
+    }
+    const int row = energyList_->currentRow();
+    if (row < 0 || row >= static_cast<int>(referenceEnergyIndices_.size())) {
+        SetStatus("Select a custom line to remove.");
+        return;
+    }
+    const std::size_t energyIndex = referenceEnergyIndices_[row];
+    if (energyIndex >= energyLines_.size() || energyLines_[energyIndex].source != "Custom") return;
+    const double energy = energyLines_[energyIndex].energy;
+    const bool wasSaved = energyLines_[energyIndex].saved;
+    energyLines_.erase(energyLines_.begin() + static_cast<std::ptrdiff_t>(energyIndex));
+    if (wasSaved) SaveCustomLines();
+    PopulateEnergyLines();
+    referenceSourceCombo_->setCurrentText("Custom");
+    manualSourceCombo_->setCurrentText("Custom");
+    RefreshEnergyList(energyList_, referenceSourceCombo_, referenceEnergyIndices_);
+    RefreshEnergyList(manualEnergyList_, manualSourceCombo_, manualEnergyIndices_);
+    SetStatus("Removed custom energy line " + FormatNumber(energy, 3) + " keV" +
+              (wasSaved ? " from future sessions." : " from this session."));
 }
 
 void MainWindow::AddRootFiles() {

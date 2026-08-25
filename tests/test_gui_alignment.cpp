@@ -3,9 +3,13 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QDoubleSpinBox>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QSettings>
+#include <QTemporaryDir>
 
 #include <algorithm>
 #include <cmath>
@@ -228,6 +232,72 @@ bool TestSelectivePeakRefit(hpge::MainWindow& window, QApplication& application)
     return true;
 }
 
+bool TestCustomPeakPersistence(hpge::MainWindow& window,
+                               QApplication& application) {
+    auto* energy = window.findChild<QDoubleSpinBox*>("customEnergyEntry");
+    auto* label = window.findChild<QLineEdit*>("customLineLabelEntry");
+    auto* save = window.findChild<QPushButton*>("saveCustomLineButton");
+    auto* add = window.findChild<QPushButton*>("addCustomLineButton");
+    auto* source = window.findChild<QComboBox*>("referenceSourceCombo");
+    auto* lines = window.findChild<QListWidget*>("referenceEnergyList");
+    if (!energy || !label || !save || !add || !source || !lines) {
+        std::cerr << "Custom peak persistence controls are missing\n";
+        return false;
+    }
+    energy->setValue(1115.432);
+    label->setText("laboratory background");
+    save->click();
+    energy->setValue(1777.111);
+    label->setText("session only");
+    add->click();
+    application.processEvents();
+    source->setCurrentText("Custom");
+    application.processEvents();
+    if (lines->count() != 2 ||
+        !lines->item(0)->text().contains("laboratory background") ||
+        !lines->item(0)->text().contains("[saved]") ||
+        lines->item(1)->text().contains("[saved]")) {
+        std::cerr << "Saved and session-only custom peaks are not distinguished\n";
+        return false;
+    }
+
+    {
+        hpge::MainWindow restored;
+        auto* restoredSource = restored.findChild<QComboBox*>("referenceSourceCombo");
+        auto* restoredLines = restored.findChild<QListWidget*>("referenceEnergyList");
+        auto* remove = restored.findChild<QPushButton*>("removeCustomLineButton");
+        if (!restoredSource || !restoredLines || !remove) return false;
+        restoredSource->setCurrentText("Custom");
+        application.processEvents();
+        if (restoredLines->count() != 1 ||
+            !restoredLines->item(0)->text().contains("1115.432") ||
+            !restoredLines->item(0)->text().contains("laboratory background") ||
+            !restoredLines->item(0)->text().contains("[saved]")) {
+            std::cerr << "Saved custom peak was not restored in a new window\n";
+            return false;
+        }
+        restoredLines->setCurrentRow(0);
+        remove->click();
+        application.processEvents();
+        if (restoredLines->count() != 0) {
+            std::cerr << "Saved custom peak was not removed\n";
+            return false;
+        }
+    }
+
+    hpge::MainWindow afterRemoval;
+    auto* finalSource = afterRemoval.findChild<QComboBox*>("referenceSourceCombo");
+    auto* finalLines = afterRemoval.findChild<QListWidget*>("referenceEnergyList");
+    if (!finalSource || !finalLines) return false;
+    finalSource->setCurrentText("Custom");
+    application.processEvents();
+    if (finalLines->count() != 0) {
+        std::cerr << "Removed custom peak returned in a later window\n";
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -237,21 +307,34 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    const std::string mode = argc == 3 ? argv[2] : "alignment-preview";
+    QTemporaryDir settingsDirectory;
+    if (!settingsDirectory.isValid()) {
+        std::cerr << "Could not create isolated GUI-test settings directory\n";
+        return 1;
+    }
+    QCoreApplication::setOrganizationName("HPGeCalibratorTests");
+    QCoreApplication::setApplicationName("HPGeCalibratorGuiTests");
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
+                       settingsDirectory.path());
+
     hpge::MainWindow window;
     if (!window.OpenRootFiles({argv[1]})) {
         std::cerr << "Could not load the multi-histogram ROOT sample\n";
         return 1;
     }
-    const std::string mode = argc == 3 ? argv[2] : "alignment-preview";
     const bool passed = mode == "alignment-preview"
         ? TestAlignmentPreview(window, application)
         : mode == "result-review"
             ? TestMultipleSourceResultReview(window, application)
             : mode == "selective-refit"
                 ? TestSelectivePeakRefit(window, application)
-                : false;
+                : mode == "custom-peak-persistence"
+                    ? TestCustomPeakPersistence(window, application)
+                    : false;
     if (!passed && mode != "alignment-preview" && mode != "result-review" &&
-        mode != "selective-refit") {
+        mode != "selective-refit" && mode != "custom-peak-persistence") {
         std::cerr << "Unknown GUI test mode: " << mode << '\n';
         return 2;
     }
