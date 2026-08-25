@@ -2,9 +2,11 @@
 #include "SpectrumPlotWidget.h"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QFile>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -177,6 +179,162 @@ public:
         }
         window.RefreshResults();
         return true;
+    }
+
+    static bool PrepareCompleteProject(MainWindow& window) {
+        if (!InstallTwoSourceResult(window) ||
+            !ApplySelectiveReplacementAndAddition(window)) return false;
+        window.referencePeaks_.clear();
+        for (std::size_t dataset = 0; dataset < window.descriptors_.size(); ++dataset) {
+            const auto result = window.results_.find(3);
+            if (result == window.results_.end()) return false;
+            const auto point = std::find_if(
+                result->second.points.begin(), result->second.points.end(),
+                [&](const CalibrationPoint& item) {
+                    return item.datasetId == window.descriptors_[dataset].id;
+                });
+            if (point == result->second.points.end()) return false;
+            window.referencePeaks_.push_back({point->datasetId, point->charge,
+                point->energy, "project reference", point->peakFit});
+            PeakMatchResult alignment;
+            alignment.success = true;
+            alignment.referenceCharges = {500.0, 1500.0, 2500.0};
+            alignment.charges = {525.0, 1575.0, 2625.0};
+            alignment.matched = {true, true, true};
+            alignment.scale = 1.05 + 0.01 * static_cast<double>(dataset);
+            alignment.offset = 12.0 + static_cast<double>(dataset);
+            alignment.quadratic = 1.0e-6 * static_cast<double>(dataset);
+            alignment.alignmentCost = 2.5 + static_cast<double>(dataset);
+            alignment.referenceSensitivity = 0.42;
+            alignment.targetSensitivity = 0.37;
+            alignment.quadraticModel = dataset != 0;
+            window.alignmentResults_[{3, point->datasetId}] = std::move(alignment);
+        }
+        MainWindow::ManualPeak pending;
+        pending.datasetId = window.descriptors_.front().id;
+        pending.crystal = 3;
+        pending.charge = 2875.25;
+        pending.energy = 2222.75;
+        pending.label = "pending manual project peak";
+        pending.peakFit.success = true;
+        pending.peakFit.status = "manual test fit";
+        pending.peakFit.rangeLow = 2850.0;
+        pending.peakFit.rangeHigh = 2900.0;
+        pending.peakFit.centroid = pending.charge;
+        pending.peakFit.centroidError = 0.35;
+        pending.peakFit.sigma = 4.2;
+        pending.peakFit.height = 275.0;
+        pending.peakFit.tailFraction = 0.05;
+        pending.peakFit.beta = 15.0;
+        pending.peakFit.stepFraction = 0.02;
+        pending.peakFit.background0 = 3.0;
+        pending.peakFit.background1 = 0.2;
+        pending.peakFit.background2 = 0.01;
+        pending.peakFit.chi2 = 18.5;
+        pending.peakFit.ndf = 31;
+        window.manualPeaks_.push_back(std::move(pending));
+        window.energyLines_.push_back({2222.75, "project-only custom", "Custom", false});
+        window.PopulateEnergyLines();
+        window.histogramList_->selectAll();
+        window.crystalList_->clearSelection();
+        window.crystalList_->item(3)->setSelected(true);
+        window.crystalList_->item(7)->setSelected(true);
+        window.orientationCombo_->setCurrentIndex(0);
+        window.referenceCrystalEntry_->setValue(0);
+        window.sigmaEntry_->setValue(3.4);
+        window.thresholdEntry_->setValue(0.027);
+        window.residualLimitEntry_->setValue(2.75);
+        window.alignmentSensitivityEntry_->setValue(58.0);
+        window.autoTuneAlignmentEntry_->setChecked(false);
+        window.alignmentModelCombo_->setCurrentIndex(2);
+        window.alignedFitHalfRangeEntry_->setValue(42.5);
+        window.alignmentCrystalEntry_->setValue(7);
+        window.RefreshReferencePeakList();
+        window.RefreshManualPeakList();
+        return true;
+    }
+
+    static bool VerifyCompleteProject(const MainWindow& window) {
+        if (window.descriptors_.size() != 2 ||
+            window.SelectedDescriptorIndices().size() != 2 ||
+            window.SelectedCrystals() != std::vector<int>({3, 7}) ||
+            window.referencePeaks_.size() != 2 || window.manualPeaks_.size() != 1 ||
+            window.results_.size() != 1 || window.alignmentResults_.size() != 2) return false;
+        const auto result = window.results_.find(3);
+        if (result == window.results_.end() || result->second.points.size() != 5) return false;
+        const int appliedManual = static_cast<int>(std::count_if(
+            result->second.points.begin(), result->second.points.end(),
+            [](const CalibrationPoint& point) { return point.manual; }));
+        const auto& pending = window.manualPeaks_.front();
+        const bool customRestored = std::any_of(
+            window.energyLines_.begin(), window.energyLines_.end(),
+            [](const MainWindow::EnergyLine& line) {
+                return line.source == "Custom" && std::abs(line.energy - 2222.75) < 1e-9 &&
+                       line.label == "project-only custom";
+            });
+        return appliedManual == 2 && customRestored &&
+               pending.label == "pending manual project peak" &&
+               pending.peakFit.status == "manual test fit" &&
+               pending.peakFit.rangeLow == 2850.0 &&
+               pending.peakFit.rangeHigh == 2900.0 &&
+               pending.peakFit.centroid == 2875.25 &&
+               pending.peakFit.sigma == 4.2 && pending.peakFit.ndf == 31 &&
+               window.sigmaEntry_->value() == 3.4 &&
+               window.thresholdEntry_->value() == 0.027 &&
+               window.residualLimitEntry_->value() == 2.75 &&
+               window.alignmentSensitivityEntry_->value() == 58.0 &&
+               !window.autoTuneAlignmentEntry_->isChecked() &&
+               window.alignmentModelCombo_->currentIndex() == 2 &&
+               window.alignedFitHalfRangeEntry_->value() == 42.5 &&
+               window.alignmentCrystalEntry_->value() == 7;
+    }
+
+    static bool ContinueRestoredProject(MainWindow& window,
+                                        const std::string& additionalRootFile) {
+        const std::size_t previousDescriptors = window.descriptors_.size();
+        const std::size_t previousReferences = window.referencePeaks_.size();
+        const std::size_t previousResults = window.results_.size();
+        ReferencePeak extra = window.referencePeaks_.front();
+        extra.energy += 0.5;
+        extra.label = "added after restore";
+        window.referencePeaks_.push_back(std::move(extra));
+        if (!window.OpenRootFiles({additionalRootFile})) return false;
+        return window.descriptors_.size() > previousDescriptors &&
+               window.referencePeaks_.size() == previousReferences + 1 &&
+               window.results_.size() == previousResults;
+    }
+
+    static bool VerifyContinuedProject(const MainWindow& window) {
+        return window.descriptors_.size() == 4 && window.referencePeaks_.size() == 3 &&
+               window.results_.size() == 1 && std::any_of(
+                   window.referencePeaks_.begin(), window.referencePeaks_.end(),
+                   [](const ReferencePeak& peak) { return peak.label == "added after restore"; });
+    }
+
+    static void InstallResidualOverview(MainWindow& window) {
+        window.results_.clear();
+        for (int crystal = 0; crystal < 64; ++crystal) {
+            CalibrationResult result;
+            result.crystal = crystal;
+            result.success = true;
+            result.needsReview = false;
+            result.status = "residual overview test";
+            for (std::size_t dataset = 0; dataset < window.descriptors_.size(); ++dataset) {
+                for (int line = 0; line < 2; ++line) {
+                    CalibrationPoint point;
+                    point.datasetId = window.descriptors_[dataset].id;
+                    point.energy = 800.0 + 500.0 * line + 100.0 * dataset;
+                    point.charge = 1000.0 + 600.0 * line + 5.0 * crystal;
+                    point.residual = 0.04 * static_cast<double>((crystal % 9) - 4) +
+                                     0.12 * line - 0.05 * static_cast<double>(dataset);
+                    point.peakFit.success = true;
+                    point.peakFit.centroid = point.charge;
+                    result.points.push_back(point);
+                }
+            }
+            window.results_[crystal] = std::move(result);
+        }
+        window.RefreshResults();
     }
 };
 
@@ -401,6 +559,86 @@ bool TestDirectAlignedFitRange(hpge::MainWindow& window,
     return true;
 }
 
+bool TestCompleteProjectPersistence(hpge::MainWindow& window,
+                                    QApplication& application,
+                                    const std::string& samplePath) {
+    if (!hpge::MainWindowTestAccess::PrepareCompleteProject(window)) {
+        std::cerr << "Could not prepare complete fitting state for project save\n";
+        return false;
+    }
+    QTemporaryDir projectDirectory;
+    if (!projectDirectory.isValid()) return false;
+    const std::string projectPath =
+        (projectDirectory.path() + "/calibration.hpgecal.json").toStdString();
+    std::string error;
+    if (!window.SaveProject(projectPath, error)) {
+        std::cerr << "Could not save complete project: " << error << '\n';
+        return false;
+    }
+    hpge::MainWindow restored;
+    if (!restored.OpenProject(projectPath, error) ||
+        !hpge::MainWindowTestAccess::VerifyCompleteProject(restored)) {
+        std::cerr << "Complete project was not restored: " << error << '\n';
+        return false;
+    }
+    application.processEvents();
+
+    const QString additionalPath = projectDirectory.path() + "/additional.root";
+    if (!QFile::copy(QString::fromStdString(samplePath), additionalPath) ||
+        !hpge::MainWindowTestAccess::ContinueRestoredProject(
+            restored, additionalPath.toStdString())) {
+        std::cerr << "Could not add peaks and ROOT files after project restoration\n";
+        return false;
+    }
+    const std::string resumedPath =
+        (projectDirectory.path() + "/resumed.hpgecal.json").toStdString();
+    if (!restored.SaveProject(resumedPath, error)) return false;
+    hpge::MainWindow resumed;
+    if (!resumed.OpenProject(resumedPath, error) ||
+        !hpge::MainWindowTestAccess::VerifyContinuedProject(resumed)) {
+        std::cerr << "Extended project did not survive a second restore: " << error << '\n';
+        return false;
+    }
+    return true;
+}
+
+bool TestResidualsByCrystal(hpge::MainWindow& window,
+                            QApplication& application) {
+    hpge::MainWindowTestAccess::InstallResidualOverview(window);
+    auto* dataset = window.findChild<QComboBox*>("residualDatasetCombo");
+    auto* show = window.findChild<QPushButton*>("showResidualsByCrystalButton");
+    auto* primary = dynamic_cast<hpge::SpectrumPlotWidget*>(
+        window.findChild<QWidget*>("primaryPlot"));
+    if (!dataset || !show || !primary || dataset->count() != 3) {
+        std::cerr << "Residual-overview controls are unavailable\n";
+        return false;
+    }
+    dataset->setCurrentIndex(0);
+    show->click();
+    application.processEvents();
+    const auto [minimum, maximum] = primary->FullXRange();
+    if (primary->Title().find("residuals versus detector crystal") == std::string::npos ||
+        primary->Series().size() != 5 || minimum != 0.0 || maximum != 63.0) {
+        std::cerr << "All-source residual overview does not span crystals 0-63\n";
+        return false;
+    }
+    for (std::size_t index = 1; index < primary->Series().size(); ++index) {
+        if (primary->Series()[index].x.size() != 64 ||
+            primary->Series()[index].y.size() != 64) {
+            std::cerr << "A fitted energy does not include all 64 crystal residuals\n";
+            return false;
+        }
+    }
+    dataset->setCurrentIndex(1);
+    show->click();
+    application.processEvents();
+    if (primary->Series().size() != 3) {
+        std::cerr << "Dataset-filtered residual overview has the wrong energy series\n";
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -437,10 +675,16 @@ int main(int argc, char** argv) {
                     ? TestCustomPeakPersistence(window, application)
                     : mode == "direct-aligned-fit"
                         ? TestDirectAlignedFitRange(window, application)
-                        : false;
+                        : mode == "project-persistence"
+                            ? TestCompleteProjectPersistence(
+                                  window, application, argv[1])
+                            : mode == "residuals-by-crystal"
+                                ? TestResidualsByCrystal(window, application)
+                                : false;
     if (!passed && mode != "alignment-preview" && mode != "result-review" &&
         mode != "selective-refit" && mode != "custom-peak-persistence" &&
-        mode != "direct-aligned-fit") {
+        mode != "direct-aligned-fit" && mode != "project-persistence" &&
+        mode != "residuals-by-crystal") {
         std::cerr << "Unknown GUI test mode: " << mode << '\n';
         return 2;
     }

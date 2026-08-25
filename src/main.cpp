@@ -17,6 +17,7 @@ int main(int argc, char** argv) {
     try {
         hpge::MainWindow window;
         std::vector<std::string> rootFiles;
+        std::string projectFile;
         const QStringList arguments = QCoreApplication::arguments();
         for (int index = 1; index < arguments.size(); ++index) {
             if (arguments[index] == "--screenshot") {
@@ -25,6 +26,15 @@ int main(int argc, char** argv) {
             }
             if (arguments[index].endsWith(".root", Qt::CaseInsensitive)) {
                 rootFiles.push_back(arguments[index].toStdString());
+            } else if (arguments[index].endsWith(".hpgecal.json", Qt::CaseInsensitive)) {
+                projectFile = arguments[index].toStdString();
+            }
+        }
+        if (!projectFile.empty()) {
+            std::string error;
+            if (!window.OpenProject(projectFile, error)) {
+                std::cerr << error << '\n';
+                return 4;
             }
         }
         if (!rootFiles.empty()) window.OpenRootFiles(rootFiles);

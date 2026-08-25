@@ -31,8 +31,10 @@ The application runs on macOS and Linux with Qt 6 and a CERN ROOT installation. 
 - Exposes selectable preview coefficients and a per-crystal list of stored `a0`, `a1`, `a2`, minimized cost, matched-pattern count, and effective reference/target sensitivities. Any stored parameter row can be copied to the clipboard.
 - Provides separate **Zoom / pan** and **Select peak-fit range** mouse modes so inspecting a spectrum cannot accidentally create a fit interval. Wheel zoom and right-drag pan remain available while selecting fit limits; Back, Zoom −, Zoom +, Reset, left-drag zoom, and double-click reset provide ROOT-like navigation. The zoom window stays fixed when modes change or fitted overlays are added.
 - Uses a custom Qt plot widget, so ROOT object selection, class/editor panels, and canvas callbacks cannot interrupt spectrum interaction.
+- Saves and restores complete versioned `.hpgecal.json` projects from the **File** menu. A project records ROOT files with portable relative-path fallbacks, selected TH2 datasets/crystals, fitting controls, custom/reference peaks, pending manual peaks, applied manual and automatic peak fits, calibration coefficients/results, and alignment parameters. Restored projects remain editable and accept additional peaks and ROOT files.
 - Combines peak points from multiple source histograms into one quadratic fit per crystal.
 - Displays calibration curves and per-line residuals versus assigned peak energy, and flags high-RMS or exactly determined fits for review.
+- Displays every fitted energy residual versus detector crystal on a fixed 0–63 axis, filterable by source histogram, with a second plot of per-crystal residual RMS and maximum absolute residual.
 - Lists every fitted dataset/energy/centroid for the selected crystal. Selecting a point prepares only that corresponding peak for replacement; selecting another known/custom energy adds a new point.
 - Applies pending replacements and additions to the existing point set without rerunning automatic peak finding or refitting untouched RadWare peaks. Only the second-order calibration polynomial and residuals are recomputed.
 - Binds manual corrections to the single crystal highlighted in the calibration-results list and labels the correction panel with that crystal number.
@@ -77,7 +79,7 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-The test suite reports thirty-three focused checks separately: peak discovery and refinement,
+The test suite reports thirty-five focused checks separately: peak discovery and refinement,
 single- and multi-peak mapping, RadWare peak fitting and validation, mapped interval fitting,
 alignment-constrained peak identification that rejects a locally convincing contaminant pattern,
 intensity-independent and two-line pattern alignment, wide-range Co-56 crystal alignment,
@@ -85,7 +87,9 @@ low-statistics spike rejection, continuous per-spectrum sensitivity tuning, quad
 in the presence of dominant low-energy X-rays, multi-histogram alignment-preview refresh,
 multi-source fitted-spectrum result review, selective single-crystal peak replacement/addition,
 preservation of untouched fitted peaks, persistent/session-only custom-line restoration and removal,
-exact direct-alignment fit-range mapping and alignment-parameter access, and
+exact direct-alignment fit-range mapping and alignment-parameter access,
+complete project save/restore/extension including manual fits, 64-crystal energy-residual
+overview and per-crystal quality plots, and
 alignment validation, quadratic fitting and validation, recursive histogram discovery/cache loading, both TH2 axis
 orientations, repeated multi-file projection/cache cycling, repository error handling, and sample
 ROOT-file generation, combined calibrated-spectrum/FWHM analysis, three-list C++ export,
@@ -121,7 +125,7 @@ If Qt reports that the `xcb` platform plugin cannot be initialized on a minimal 
 
 ## Calibration workflow
 
-1. In **Data**, add one or several ROOT files in the file browser. Select one or more discovered `TH2` histograms, choose the axis orientation, reference crystal, and crystals to calibrate.
+1. In **Data**, add one or several ROOT files in the file browser. Select one or more discovered `TH2` histograms, choose the axis orientation, reference crystal, and crystals to calibrate. To resume earlier work, use **File → Open project…**; `.hpgecal.json` projects reload their ROOT files and all stored fit state. They can also be passed to `hpge-calibrator` on the command line.
 2. In **Reference peaks**, choose the first source histogram and show its reference spectrum. Select the radioactive source first so only that source's energies are listed. For a custom line, enter its energy and optional label, then choose **Add for session** or **Save for future**; persistent entries appear under **Custom** with a `[saved]` marker and can be deleted with **Remove selected custom line**. Use the zoom toolbar, wheel, or **Zoom / pan** mode to inspect the spectrum, then switch to **Select peak-fit range**, select an energy, and click the lower and upper fit limits. The zoomed view remains in place, and the red RadWare fit curve, fitted centroid, and energy label remain visible. Repeat for all usable lines and source histograms.
 3. In **Calibration & review**, choose the starting peak sensitivity, **Aligned peak-fit half-range**, charge-mapping model, histogram, and target crystal under **Pre-calibration spectrum alignment**, then click **Show aligned spectra**. The half-range is defined in the displayed reference-charge coordinate; automatic calibration maps both boundaries exactly into each target spectrum and fits only inside that interval. Leave **Auto-tune for each crystal spectrum** enabled to adjust the sensitivity independently for each reference/target projection; disable it when you want the exact 0–100% value. Use **Auto — affine or 2nd order** normally, or force `a0 + a1*q` or the second-order polynomial `a0 + a1*q + a2*q*q`. Selecting another histogram refreshes the preview immediately; its dataset name appears in both the plot title and status. The blue reference and red target spectra are normalized and overlaid after independent peak-pattern mapping; no user-selected energy lines or peak intensities are used to obtain the alignment. The selectable preview text reports the coefficients and quality values. After calibration, select a result to inspect or copy every dataset's stored alignment row. No energy calibration is applied in the preview.
 4. Adjust peak-search parameters if necessary and calibrate the selected crystals. At least three total reference points are required for a quadratic fit; four or more provide a meaningful residual-based quality check.
@@ -129,7 +133,9 @@ If Qt reports that the `xcb` platform plugin cannot be initialized on a minimal 
 6. For any `REVIEW` or `FAIL` result, inspect **Existing fitted peaks** under Manual correction. Selecting a row chooses its dataset and energy and opens that crystal spectrum for replacement. Select a new range to create a pending replacement, or choose another known/custom energy and range to add a point. Remove any unwanted pending item, then press **Apply pending peaks (keep all others)**. Untouched centroids and RadWare fits are preserved; only the calibration polynomial and residuals are recomputed.
 7. Inspect **Fit + residuals**; residual x coordinates are the assigned peak energies rather than charge centroids.
 8. Under **Combined calibrated spectrum quality**, select each source and inspect the summed energy spectrum, combined-line residuals, FWHM, and percentage resolution.
-9. Export the complete CSV. The same action also writes `<csv-name>_coefficients.hpp` with separate `p0`, `p1`, and `p2` C++ arrays for crystals 0–63; unfitted crystals contain a `missing` NaN placeholder.
+9. Under **Residual overview across detector crystals**, choose all sources or one source and click **Show residuals vs crystals**. The upper plot overlays every energy-line residual on crystal indices 0–63; the lower plot shows each crystal's RMS and largest absolute residual.
+10. Use **File → Save project…** whenever you want a resumable snapshot. After restoring it, existing manual and automatic fits remain available for review and selective correction, and **Add ROOT files…** plus the normal reference-peak controls can extend the analysis before saving again.
+11. Export the complete CSV. The same action also writes `<csv-name>_coefficients.hpp` with separate `p0`, `p1`, and `p2` C++ arrays for crystals 0–63; unfitted crystals contain a `missing` NaN placeholder.
 
 ## Histogram convention
 

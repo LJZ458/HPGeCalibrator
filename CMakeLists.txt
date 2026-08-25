@@ -151,6 +151,18 @@ if(BUILD_TESTING)
     set_tests_properties(qt-direct-aligned-peak-fit-range PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         DEPENDS sample-generator)
+    add_test(NAME qt-complete-project-persistence
+             COMMAND hpge-gui-alignment-tests
+                     ${CMAKE_CURRENT_BINARY_DIR}/hpge_test_sample.root project-persistence)
+    set_tests_properties(qt-complete-project-persistence PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        DEPENDS sample-generator)
+    add_test(NAME qt-residuals-versus-all-crystals
+             COMMAND hpge-gui-alignment-tests
+                     ${CMAKE_CURRENT_BINARY_DIR}/hpge_test_sample.root residuals-by-crystal)
+    set_tests_properties(qt-residuals-versus-all-crystals PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        DEPENDS sample-generator)
 endif()
 
 install(TARGETS hpge-calibrator hpge-generate-sample RUNTIME DESTINATION bin)

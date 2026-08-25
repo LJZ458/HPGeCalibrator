@@ -9,6 +9,8 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QFile>
+#include <QFileInfo>
 #include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -16,7 +18,11 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenuBar>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QPushButton>
+#include <QSaveFile>
 #include <QScrollArea>
 #include <QSettings>
 #include <QSpinBox>
@@ -24,6 +30,7 @@
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QVBoxLayout>
+#include <QDir>
 
 #include <TH1D.h>
 
@@ -33,6 +40,7 @@
 #include <fstream>
 #include <filesystem>
 #include <iomanip>
+#include <set>
 #include <sstream>
 
 namespace hpge {
@@ -135,6 +143,143 @@ PlotSeries FitSeries(const PeakFitResult& fit, const std::string& name, bool das
     return series;
 }
 
+QJsonArray DoubleArray(const std::vector<double>& values) {
+    QJsonArray array;
+    for (double value : values) array.append(value);
+    return array;
+}
+
+QJsonArray BoolArray(const std::vector<bool>& values) {
+    QJsonArray array;
+    for (bool value : values) array.append(value);
+    return array;
+}
+
+std::vector<double> ReadDoubleArray(const QJsonValue& value) {
+    std::vector<double> output;
+    for (const auto item : value.toArray()) output.push_back(item.toDouble());
+    return output;
+}
+
+std::vector<bool> ReadBoolArray(const QJsonValue& value) {
+    std::vector<bool> output;
+    for (const auto item : value.toArray()) output.push_back(item.toBool());
+    return output;
+}
+
+QJsonObject PeakFitJson(const PeakFitResult& fit) {
+    return {{"success", fit.success}, {"status", Text(fit.status)},
+            {"rangeLow", fit.rangeLow}, {"rangeHigh", fit.rangeHigh},
+            {"centroid", fit.centroid}, {"centroidError", fit.centroidError},
+            {"sigma", fit.sigma}, {"height", fit.height},
+            {"tailFraction", fit.tailFraction}, {"beta", fit.beta},
+            {"stepFraction", fit.stepFraction}, {"background0", fit.background0},
+            {"background1", fit.background1}, {"background2", fit.background2},
+            {"chi2", fit.chi2}, {"ndf", fit.ndf}};
+}
+
+PeakFitResult ReadPeakFit(const QJsonValue& value) {
+    const auto object = value.toObject();
+    PeakFitResult fit;
+    fit.success = object["success"].toBool();
+    fit.status = object["status"].toString().toStdString();
+    fit.rangeLow = object["rangeLow"].toDouble();
+    fit.rangeHigh = object["rangeHigh"].toDouble();
+    fit.centroid = object["centroid"].toDouble();
+    fit.centroidError = object["centroidError"].toDouble();
+    fit.sigma = object["sigma"].toDouble();
+    fit.height = object["height"].toDouble();
+    fit.tailFraction = object["tailFraction"].toDouble();
+    fit.beta = object["beta"].toDouble();
+    fit.stepFraction = object["stepFraction"].toDouble();
+    fit.background0 = object["background0"].toDouble();
+    fit.background1 = object["background1"].toDouble();
+    fit.background2 = object["background2"].toDouble();
+    fit.chi2 = object["chi2"].toDouble();
+    fit.ndf = object["ndf"].toInt();
+    return fit;
+}
+
+QJsonObject CalibrationPointJson(const CalibrationPoint& point) {
+    return {{"datasetId", Text(point.datasetId)}, {"charge", point.charge},
+            {"energy", point.energy}, {"chargeError", point.chargeError},
+            {"manual", point.manual}, {"residual", point.residual},
+            {"peakFit", PeakFitJson(point.peakFit)}};
+}
+
+CalibrationPoint ReadCalibrationPoint(const QJsonValue& value) {
+    const auto object = value.toObject();
+    CalibrationPoint point;
+    point.datasetId = object["datasetId"].toString().toStdString();
+    point.charge = object["charge"].toDouble();
+    point.energy = object["energy"].toDouble();
+    point.chargeError = object["chargeError"].toDouble();
+    point.manual = object["manual"].toBool();
+    point.residual = object["residual"].toDouble();
+    point.peakFit = ReadPeakFit(object["peakFit"]);
+    return point;
+}
+
+QJsonObject CalibrationResultJson(const CalibrationResult& result) {
+    QJsonArray points;
+    for (const auto& point : result.points) points.append(CalibrationPointJson(point));
+    return {{"crystal", result.crystal}, {"success", result.success},
+            {"needsReview", result.needsReview}, {"status", Text(result.status)},
+            {"p0", result.p0}, {"p1", result.p1}, {"p2", result.p2},
+            {"chi2", result.chi2}, {"ndf", result.ndf},
+            {"residualRms", result.residualRms}, {"points", points}};
+}
+
+CalibrationResult ReadCalibrationResult(const QJsonValue& value) {
+    const auto object = value.toObject();
+    CalibrationResult result;
+    result.crystal = object["crystal"].toInt(-1);
+    result.success = object["success"].toBool();
+    result.needsReview = object["needsReview"].toBool(true);
+    result.status = object["status"].toString().toStdString();
+    result.p0 = object["p0"].toDouble();
+    result.p1 = object["p1"].toDouble();
+    result.p2 = object["p2"].toDouble();
+    result.chi2 = object["chi2"].toDouble();
+    result.ndf = object["ndf"].toInt();
+    result.residualRms = object["residualRms"].toDouble();
+    for (const auto point : object["points"].toArray()) {
+        result.points.push_back(ReadCalibrationPoint(point));
+    }
+    return result;
+}
+
+QJsonObject PeakMatchJson(const PeakMatchResult& match) {
+    return {{"success", match.success},
+            {"referenceCharges", DoubleArray(match.referenceCharges)},
+            {"charges", DoubleArray(match.charges)},
+            {"matched", BoolArray(match.matched)},
+            {"scale", match.scale}, {"offset", match.offset},
+            {"quadratic", match.quadratic}, {"score", match.score},
+            {"alignmentCost", match.alignmentCost},
+            {"referenceSensitivity", match.referenceSensitivity},
+            {"targetSensitivity", match.targetSensitivity},
+            {"quadraticModel", match.quadraticModel}};
+}
+
+PeakMatchResult ReadPeakMatch(const QJsonValue& value) {
+    const auto object = value.toObject();
+    PeakMatchResult match;
+    match.success = object["success"].toBool();
+    match.referenceCharges = ReadDoubleArray(object["referenceCharges"]);
+    match.charges = ReadDoubleArray(object["charges"]);
+    match.matched = ReadBoolArray(object["matched"]);
+    match.scale = object["scale"].toDouble(1.0);
+    match.offset = object["offset"].toDouble();
+    match.quadratic = object["quadratic"].toDouble();
+    match.score = object["score"].toDouble();
+    match.alignmentCost = object["alignmentCost"].toDouble();
+    match.referenceSensitivity = object["referenceSensitivity"].toDouble();
+    match.targetSensitivity = object["targetSensitivity"].toDouble();
+    match.quadraticModel = object["quadraticModel"].toBool();
+    return match;
+}
+
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
@@ -149,11 +294,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
 void MainWindow::BuildInterface() {
     auto* fileMenu = menuBar()->addMenu("&File");
+    auto* openProjectAction = fileMenu->addAction("&Open project...");
+    openProjectAction->setShortcut(QKeySequence("Ctrl+Shift+O"));
+    auto* saveProjectAction = fileMenu->addAction("&Save project...");
+    saveProjectAction->setShortcut(QKeySequence("Ctrl+Shift+S"));
+    fileMenu->addSeparator();
     auto* openAction = fileMenu->addAction("&Add ROOT files...");
     openAction->setShortcut(QKeySequence::Open);
     auto* exportAction = fileMenu->addAction("Export calibration CSV...");
     fileMenu->addSeparator();
     auto* quitAction = fileMenu->addAction("Quit");
+    connect(openProjectAction, &QAction::triggered, this, [this] { OpenProjectDialog(); });
+    connect(saveProjectAction, &QAction::triggered, this, [this] { SaveProjectDialog(); });
     connect(openAction, &QAction::triggered, this, [this] { AddRootFiles(); });
     connect(exportAction, &QAction::triggered, this, [this] { ExportCsv(); });
     connect(quitAction, &QAction::triggered, this, &QWidget::close);
@@ -440,6 +592,21 @@ QWidget* MainWindow::BuildCalibrationTab() {
     connect(showAllSpectra, &QPushButton::clicked, this, [this] { ShowAllResultSpectra(); });
     connect(showFit, &QPushButton::clicked, this, [this] { ShowSelectedCalibration(); });
     layout->addWidget(Row({showSpectrum, showAllSpectra, showFit}));
+
+    auto* residualOverview = new QGroupBox("Residual overview across detector crystals");
+    auto* residualOverviewLayout = new QVBoxLayout(residualOverview);
+    residualOverviewLayout->addWidget(Hint(
+        "Plots every fitted energy residual versus crystal 0-63 and summarizes each "
+        "crystal's RMS and maximum absolute residual."));
+    residualDatasetCombo_ = new QComboBox;
+    residualDatasetCombo_->setObjectName("residualDatasetCombo");
+    auto* showResidualOverview = new QPushButton("Show residuals vs crystals");
+    showResidualOverview->setObjectName("showResidualsByCrystalButton");
+    connect(showResidualOverview, &QPushButton::clicked, this,
+            [this] { ShowResidualsByCrystal(); });
+    residualOverviewLayout->addWidget(residualDatasetCombo_);
+    residualOverviewLayout->addWidget(showResidualOverview);
+    layout->addWidget(residualOverview);
 
     auto* combined = new QGroupBox("Combined calibrated spectrum quality");
     auto* combinedLayout = new QVBoxLayout(combined);
@@ -733,6 +900,384 @@ void MainWindow::AddRootFiles() {
     OpenRootFiles(paths);
 }
 
+void MainWindow::SaveProjectDialog() {
+    QString path = QFileDialog::getSaveFileName(
+        this, "Save HPGe calibration project", {},
+        "HPGe calibration projects (*.hpgecal.json);;JSON files (*.json)");
+    if (path.isEmpty()) return;
+    if (!path.endsWith(".json", Qt::CaseInsensitive)) path += ".hpgecal.json";
+    std::string error;
+    if (!SaveProject(path.toStdString(), error)) {
+        SetStatus(error);
+        return;
+    }
+    SetStatus("Saved the complete calibration project to " + path.toStdString() + ".");
+}
+
+void MainWindow::OpenProjectDialog() {
+    const QString path = QFileDialog::getOpenFileName(
+        this, "Open HPGe calibration project", {},
+        "HPGe calibration projects (*.hpgecal.json *.json);;All files (*)");
+    if (path.isEmpty()) return;
+    std::string error;
+    if (!OpenProject(path.toStdString(), error)) {
+        SetStatus(error);
+        return;
+    }
+    SetStatus("Restored the complete calibration project from " + path.toStdString() + ".");
+}
+
+bool MainWindow::SaveProject(const std::string& path, std::string& error) const {
+    error.clear();
+    if (path.empty()) {
+        error = "A project output path is required.";
+        return false;
+    }
+    if (descriptors_.empty()) {
+        error = "Add at least one ROOT file before saving a calibration project.";
+        return false;
+    }
+    QJsonObject root;
+    root["format"] = "HPGeCalibratorProject";
+    root["version"] = 1;
+    const QDir projectDirectory = QFileInfo(Text(path)).absoluteDir();
+    std::map<std::string, int> fileIndices;
+    QJsonArray files;
+    for (const auto& descriptor : descriptors_) {
+        if (fileIndices.find(descriptor.filePath) != fileIndices.end()) continue;
+        const int index = fileIndices.size();
+        fileIndices[descriptor.filePath] = index;
+        const QString absolutePath = QFileInfo(Text(descriptor.filePath)).absoluteFilePath();
+        files.append(QJsonObject{{"path", absolutePath},
+                                 {"relativePath", projectDirectory.relativeFilePath(absolutePath)}});
+    }
+    root["rootFiles"] = files;
+
+    const auto selectedDescriptorIndices = SelectedDescriptorIndices();
+    const std::set<int> selectedDescriptors(selectedDescriptorIndices.begin(),
+                                             selectedDescriptorIndices.end());
+    QJsonArray datasets;
+    for (std::size_t index = 0; index < descriptors_.size(); ++index) {
+        const auto& descriptor = descriptors_[index];
+        datasets.append(QJsonObject{
+            {"id", Text(descriptor.id)},
+            {"rootFile", fileIndices.at(descriptor.filePath)},
+            {"objectPath", Text(descriptor.objectPath)},
+            {"selected", selectedDescriptors.count(static_cast<int>(index)) != 0}});
+    }
+    root["datasets"] = datasets;
+
+    QJsonArray selectedCrystals;
+    for (int crystal : SelectedCrystals()) selectedCrystals.append(crystal);
+    const auto descriptorId = [this](const QComboBox* combo) {
+        const auto* descriptor = DescriptorForCombo(combo);
+        return descriptor ? Text(descriptor->id) : QString();
+    };
+    root["ui"] = QJsonObject{
+        {"orientation", orientationCombo_->currentIndex()},
+        {"referenceCrystal", ReferenceCrystal()},
+        {"selectedCrystals", selectedCrystals},
+        {"sigmaBins", sigmaEntry_->value()},
+        {"threshold", thresholdEntry_->value()},
+        {"residualLimit", residualLimitEntry_->value()},
+        {"alignmentSensitivityPercent", alignmentSensitivityEntry_->value()},
+        {"autoTuneAlignment", autoTuneAlignmentEntry_->isChecked()},
+        {"alignmentModel", alignmentModelCombo_->currentIndex()},
+        {"alignedFitHalfRange", alignedFitHalfRangeEntry_->value()},
+        {"referenceDataset", descriptorId(referenceHistogramCombo_)},
+        {"manualDataset", descriptorId(manualHistogramCombo_)},
+        {"alignmentDataset", descriptorId(alignmentHistogramCombo_)},
+        {"residualDataset", residualDatasetCombo_->currentData().toString()},
+        {"alignmentCrystal", alignmentCrystalEntry_->value()},
+        {"selectedResultCrystal", CurrentResultCrystal()}};
+
+    QJsonArray customLines;
+    for (const auto& line : energyLines_) {
+        if (line.source != "Custom") continue;
+        customLines.append(QJsonObject{{"energy", line.energy},
+                                       {"label", Text(line.label)}});
+    }
+    root["customLines"] = customLines;
+
+    QJsonArray referencePeaks;
+    for (const auto& peak : referencePeaks_) {
+        referencePeaks.append(QJsonObject{
+            {"datasetId", Text(peak.datasetId)}, {"charge", peak.charge},
+            {"energy", peak.energy}, {"label", Text(peak.label)},
+            {"peakFit", PeakFitJson(peak.peakFit)}});
+    }
+    root["referencePeaks"] = referencePeaks;
+
+    QJsonArray manualPeaks;
+    for (const auto& peak : manualPeaks_) {
+        manualPeaks.append(QJsonObject{
+            {"datasetId", Text(peak.datasetId)}, {"crystal", peak.crystal},
+            {"charge", peak.charge}, {"energy", peak.energy},
+            {"label", Text(peak.label)}, {"peakFit", PeakFitJson(peak.peakFit)}});
+    }
+    root["pendingManualPeaks"] = manualPeaks;
+
+    QJsonArray results;
+    for (const auto& [crystal, result] : results_) {
+        (void)crystal;
+        results.append(CalibrationResultJson(result));
+    }
+    root["calibrationResults"] = results;
+
+    QJsonArray alignments;
+    for (const auto& [key, alignment] : alignmentResults_) {
+        alignments.append(QJsonObject{{"crystal", key.first},
+                                      {"datasetId", Text(key.second)},
+                                      {"alignment", PeakMatchJson(alignment)}});
+    }
+    root["alignments"] = alignments;
+
+    QSaveFile output(Text(path));
+    if (!output.open(QIODevice::WriteOnly)) {
+        error = "Could not create project file: " + path;
+        return false;
+    }
+    const QByteArray projectData = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (output.write(projectData) != projectData.size() || !output.commit()) {
+        error = "Could not finish writing project file: " + path;
+        return false;
+    }
+    return true;
+}
+
+bool MainWindow::OpenProject(const std::string& path, std::string& error) {
+    error.clear();
+    QFile input(Text(path));
+    if (!input.open(QIODevice::ReadOnly)) {
+        error = "Could not open project file: " + path;
+        return false;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(input.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        error = "Invalid project JSON: " + parseError.errorString().toStdString();
+        return false;
+    }
+    const QJsonObject root = document.object();
+    if (root["format"].toString() != "HPGeCalibratorProject" ||
+        root["version"].toInt() != 1) {
+        error = "Unsupported HPGe calibration project format or version.";
+        return false;
+    }
+
+    const QDir projectDirectory = QFileInfo(Text(path)).absoluteDir();
+    std::vector<std::string> resolvedFiles;
+    for (const auto value : root["rootFiles"].toArray()) {
+        const auto object = value.toObject();
+        QString resolved = object["path"].toString();
+        if (!QFileInfo::exists(resolved)) {
+            resolved = projectDirectory.absoluteFilePath(object["relativePath"].toString());
+        }
+        if (!QFileInfo::exists(resolved)) {
+            error = "A project ROOT file is missing: " + object["path"].toString().toStdString();
+            return false;
+        }
+        resolvedFiles.push_back(QFileInfo(resolved).absoluteFilePath().toStdString());
+    }
+    if (resolvedFiles.empty()) {
+        error = "The project does not contain any ROOT files.";
+        return false;
+    }
+    const QJsonArray datasetObjects = root["datasets"].toArray();
+    RootDataRepository validator;
+    std::vector<std::vector<HistogramDescriptor>> discoveredFiles;
+    for (const auto& file : resolvedFiles) {
+        std::string validationError;
+        auto discovered = validator.Discover(file, validationError);
+        if (discovered.empty()) {
+            error = validationError.empty() ? "No TH2 histograms found in " + file
+                                            : validationError;
+            return false;
+        }
+        discoveredFiles.push_back(std::move(discovered));
+    }
+    for (const auto value : datasetObjects) {
+        const auto object = value.toObject();
+        const int rootIndex = object["rootFile"].toInt(-1);
+        const std::string objectPath = object["objectPath"].toString().toStdString();
+        if (rootIndex < 0 || rootIndex >= static_cast<int>(discoveredFiles.size()) ||
+            std::none_of(discoveredFiles[static_cast<std::size_t>(rootIndex)].begin(),
+                         discoveredFiles[static_cast<std::size_t>(rootIndex)].end(),
+                         [&](const HistogramDescriptor& item) {
+                             return item.objectPath == objectPath;
+                         })) {
+            error = "A project TH2 histogram no longer exists: " + objectPath;
+            return false;
+        }
+    }
+
+    repository_.ClearCache();
+    descriptors_.clear();
+    referencePeaks_.clear();
+    manualPeaks_.clear();
+    results_.clear();
+    alignmentResults_.clear();
+    combinedAnalyses_.clear();
+    displayedSpectrum_.reset();
+    displayedDatasetId_.clear();
+    displayedCrystal_ = -1;
+    pendingRangeStart_.reset();
+    RefreshDatasetWidgets();
+    if (!OpenRootFiles(resolvedFiles)) {
+        error = "The project ROOT files could not be rediscovered.";
+        return false;
+    }
+
+    std::map<std::string, std::string> datasetMap;
+    for (const auto value : datasetObjects) {
+        const auto object = value.toObject();
+        const int rootIndex = object["rootFile"].toInt(-1);
+        if (rootIndex < 0 || rootIndex >= static_cast<int>(resolvedFiles.size())) continue;
+        const std::string objectPath = object["objectPath"].toString().toStdString();
+        const auto descriptor = std::find_if(
+            descriptors_.begin(), descriptors_.end(), [&](const HistogramDescriptor& item) {
+                return item.filePath == resolvedFiles[static_cast<std::size_t>(rootIndex)] &&
+                       item.objectPath == objectPath;
+            });
+        if (descriptor != descriptors_.end()) {
+            datasetMap[object["id"].toString().toStdString()] = descriptor->id;
+        }
+    }
+    if (datasetMap.size() != static_cast<std::size_t>(datasetObjects.size())) {
+        error = "One or more project TH2 histograms no longer exist in the ROOT files.";
+        return false;
+    }
+    const auto remapDataset = [&](const std::string& oldId) -> std::string {
+        const auto mapped = datasetMap.find(oldId);
+        return mapped == datasetMap.end() ? std::string() : mapped->second;
+    };
+
+    energyLines_.clear();
+    PopulateEnergyLines();
+    for (const auto value : root["customLines"].toArray()) {
+        const auto object = value.toObject();
+        const double energy = object["energy"].toDouble();
+        const std::string label = object["label"].toString("user supplied").toStdString();
+        if (!(energy > 0.0) || !std::isfinite(energy)) continue;
+        const auto existing = std::find_if(
+            energyLines_.begin(), energyLines_.end(), [&](const EnergyLine& line) {
+                return line.source == "Custom" && std::abs(line.energy - energy) < 1e-6;
+            });
+        if (existing == energyLines_.end()) {
+            energyLines_.push_back({energy, label, "Custom", false});
+        }
+    }
+    PopulateEnergyLines();
+
+    const QJsonObject ui = root["ui"].toObject();
+    updatingWidgets_ = true;
+    orientationCombo_->setCurrentIndex(std::clamp(ui["orientation"].toInt(), 0, 1));
+    referenceCrystalEntry_->setValue(ui["referenceCrystal"].toInt());
+    sigmaEntry_->setValue(ui["sigmaBins"].toDouble(2.0));
+    thresholdEntry_->setValue(ui["threshold"].toDouble(0.05));
+    residualLimitEntry_->setValue(ui["residualLimit"].toDouble(1.0));
+    alignmentSensitivityEntry_->setValue(ui["alignmentSensitivityPercent"].toDouble(35.0));
+    autoTuneAlignmentEntry_->setChecked(ui["autoTuneAlignment"].toBool(true));
+    alignmentModelCombo_->setCurrentIndex(std::clamp(ui["alignmentModel"].toInt(), 0, 2));
+    alignedFitHalfRangeEntry_->setValue(ui["alignedFitHalfRange"].toDouble(35.0));
+    alignmentCrystalEntry_->setValue(ui["alignmentCrystal"].toInt(1));
+
+    histogramList_->clearSelection();
+    for (const auto value : datasetObjects) {
+        const auto object = value.toObject();
+        if (!object["selected"].toBool()) continue;
+        const std::string mappedId = remapDataset(object["id"].toString().toStdString());
+        for (std::size_t index = 0; index < descriptors_.size(); ++index) {
+            if (descriptors_[index].id == mappedId) {
+                histogramList_->item(static_cast<int>(index))->setSelected(true);
+                break;
+            }
+        }
+    }
+    crystalList_->clearSelection();
+    for (const auto value : ui["selectedCrystals"].toArray()) {
+        const int crystal = value.toInt(-1);
+        if (crystal >= 0 && crystal < crystalList_->count()) {
+            crystalList_->item(crystal)->setSelected(true);
+        }
+    }
+    const auto setDescriptorCombo = [&](QComboBox* combo, const QJsonValue& oldIdValue) {
+        const std::string mappedId = remapDataset(oldIdValue.toString().toStdString());
+        for (std::size_t index = 0; index < descriptors_.size(); ++index) {
+            if (descriptors_[index].id == mappedId) {
+                combo->setCurrentIndex(static_cast<int>(index));
+                return;
+            }
+        }
+    };
+    setDescriptorCombo(referenceHistogramCombo_, ui["referenceDataset"]);
+    setDescriptorCombo(manualHistogramCombo_, ui["manualDataset"]);
+    setDescriptorCombo(alignmentHistogramCombo_, ui["alignmentDataset"]);
+    const std::string residualDataset = remapDataset(
+        ui["residualDataset"].toString().toStdString());
+    for (int index = 0; index < residualDatasetCombo_->count(); ++index) {
+        if (residualDatasetCombo_->itemData(index).toString().toStdString() == residualDataset) {
+            residualDatasetCombo_->setCurrentIndex(index);
+            break;
+        }
+    }
+    updatingWidgets_ = false;
+
+    for (const auto value : root["referencePeaks"].toArray()) {
+        const auto object = value.toObject();
+        const std::string datasetId = remapDataset(
+            object["datasetId"].toString().toStdString());
+        if (datasetId.empty()) continue;
+        referencePeaks_.push_back({datasetId, object["charge"].toDouble(),
+            object["energy"].toDouble(), object["label"].toString().toStdString(),
+            ReadPeakFit(object["peakFit"])});
+    }
+    for (const auto value : root["pendingManualPeaks"].toArray()) {
+        const auto object = value.toObject();
+        const std::string datasetId = remapDataset(
+            object["datasetId"].toString().toStdString());
+        if (datasetId.empty()) continue;
+        manualPeaks_.push_back({datasetId, object["crystal"].toInt(-1),
+            object["charge"].toDouble(), object["energy"].toDouble(),
+            object["label"].toString().toStdString(), ReadPeakFit(object["peakFit"])});
+    }
+    for (const auto value : root["calibrationResults"].toArray()) {
+        CalibrationResult result = ReadCalibrationResult(value);
+        for (auto& point : result.points) point.datasetId = remapDataset(point.datasetId);
+        result.points.erase(std::remove_if(result.points.begin(), result.points.end(),
+            [](const CalibrationPoint& point) { return point.datasetId.empty(); }),
+            result.points.end());
+        if (result.crystal >= 0 && result.crystal < 64) {
+            results_[result.crystal] = std::move(result);
+        }
+    }
+    for (const auto value : root["alignments"].toArray()) {
+        const auto object = value.toObject();
+        const int crystal = object["crystal"].toInt(-1);
+        const std::string datasetId = remapDataset(
+            object["datasetId"].toString().toStdString());
+        if (crystal >= 0 && crystal < 64 && !datasetId.empty()) {
+            alignmentResults_[{crystal, datasetId}] = ReadPeakMatch(object["alignment"]);
+        }
+    }
+
+    RefreshReferencePeakList();
+    RefreshResults();
+    const int selectedResult = ui["selectedResultCrystal"].toInt(-1);
+    for (int row = 0; row < resultList_->count(); ++row) {
+        if (resultList_->item(row)->data(Qt::UserRole).toInt() == selectedResult) {
+            resultList_->setCurrentRow(row);
+            break;
+        }
+    }
+    RefreshAlignmentParameterList();
+    RefreshFittedPointList();
+    RefreshManualPeakList();
+    EvaluateCombinedSpectra();
+    ShowReferenceSpectrum();
+    return true;
+}
+
 bool MainWindow::OpenRootFiles(const std::vector<std::string>& files) {
     if (files.empty()) return false;
     std::vector<std::string> selectedIds;
@@ -774,6 +1319,8 @@ void MainWindow::RefreshDatasetWidgets() {
     referenceHistogramCombo_->clear();
     manualHistogramCombo_->clear();
     alignmentHistogramCombo_->clear();
+    residualDatasetCombo_->clear();
+    residualDatasetCombo_->addItem("All source histograms", QString());
     for (std::size_t i = 0; i < descriptors_.size(); ++i) {
         const auto& descriptor = descriptors_[i];
         histogramList_->addItem(Text(descriptor.displayName + "  [" +
@@ -783,6 +1330,7 @@ void MainWindow::RefreshDatasetWidgets() {
         referenceHistogramCombo_->addItem(name, static_cast<int>(i));
         manualHistogramCombo_->addItem(name, static_cast<int>(i));
         alignmentHistogramCombo_->addItem(name, static_cast<int>(i));
+        residualDatasetCombo_->addItem(name, Text(descriptor.id));
     }
     updatingWidgets_ = false;
 }
@@ -1670,6 +2218,97 @@ void MainWindow::ShowSelectedCalibration() {
                             "Peak energy (keV)", "Energy - fit (keV)", {std::move(residuals)}, {},
                             {false, 0.15});
     SetStatus("Crystal " + std::to_string(crystal) + ": " + result.status);
+}
+
+void MainWindow::ShowResidualsByCrystal() {
+    if (results_.empty()) {
+        SetStatus("Run or restore a calibration before plotting residuals by crystal.");
+        return;
+    }
+    const std::string selectedDataset =
+        residualDatasetCombo_->currentData().toString().toStdString();
+    using ResidualKey = std::pair<std::string, double>;
+    std::map<ResidualKey, PlotSeries> byLine;
+    std::map<int, std::vector<double>> byCrystal;
+    constexpr std::array<const char*, 10> colors{
+        "#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed",
+        "#0891b2", "#be185d", "#4d7c0f", "#9333ea", "#0f766e"};
+    int colorIndex = 0;
+    for (const auto& [crystal, result] : results_) {
+        if (!result.success) continue;
+        for (const auto& point : result.points) {
+            if (!selectedDataset.empty() && point.datasetId != selectedDataset) continue;
+            const ResidualKey key{point.datasetId, point.energy};
+            auto [series, inserted] = byLine.try_emplace(key);
+            if (inserted) {
+                const auto descriptor = std::find_if(
+                    descriptors_.begin(), descriptors_.end(), [&](const HistogramDescriptor& item) {
+                        return item.id == point.datasetId;
+                    });
+                const std::string dataset = descriptor == descriptors_.end()
+                    ? point.datasetId : descriptor->objectPath;
+                series->second.name = dataset + " / " + FormatNumber(point.energy, 3) + " keV";
+                series->second.color = QColor(colors[static_cast<std::size_t>(colorIndex) %
+                                                     colors.size()]);
+                series->second.points = true;
+                ++colorIndex;
+            }
+            series->second.x.push_back(crystal);
+            series->second.y.push_back(point.residual);
+            byCrystal[crystal].push_back(point.residual);
+        }
+    }
+    if (byLine.empty()) {
+        SetStatus("No successful fitted residuals are available for the selected source.");
+        return;
+    }
+    PlotSeries bounds;
+    bounds.x = {0.0, 63.0};
+    bounds.y = {0.0, 0.0};
+    bounds.color = QColor(0, 0, 0, 0);
+    std::vector<PlotSeries> residualSeries{std::move(bounds)};
+    for (auto& [key, series] : byLine) {
+        (void)key;
+        residualSeries.push_back(std::move(series));
+    }
+    PlotSeries rms;
+    rms.name = "RMS residual";
+    rms.color = QColor("#2563eb");
+    rms.points = true;
+    PlotSeries maximum;
+    maximum.name = "Maximum |residual|";
+    maximum.color = QColor("#dc2626");
+    maximum.points = true;
+    for (const auto& [crystal, residuals] : byCrystal) {
+        double sumSquares = 0.0;
+        double maximumAbsolute = 0.0;
+        for (double residual : residuals) {
+            sumSquares += residual * residual;
+            maximumAbsolute = std::max(maximumAbsolute, std::abs(residual));
+        }
+        rms.x.push_back(crystal);
+        rms.y.push_back(std::sqrt(sumSquares / static_cast<double>(residuals.size())));
+        maximum.x.push_back(crystal);
+        maximum.y.push_back(maximumAbsolute);
+    }
+    PlotSeries qualityBounds;
+    qualityBounds.x = {0.0, 63.0};
+    qualityBounds.y = {0.0, 0.0};
+    qualityBounds.color = QColor(0, 0, 0, 0);
+    displayedSpectrum_.reset();
+    displayedDatasetId_.clear();
+    displayedCrystal_ = -1;
+    pendingRangeStart_.reset();
+    SetSecondaryPlotVisible(true);
+    primaryPlot_->SetPlot("Energy residuals versus detector crystal",
+                          "Detector crystal (0-63)", "Energy residual (keV)",
+                          std::move(residualSeries));
+    secondaryPlot_->SetPlot("Per-crystal residual quality",
+                            "Detector crystal (0-63)", "Residual magnitude (keV)",
+                            {std::move(qualityBounds), std::move(rms), std::move(maximum)});
+    SetStatus("Showing " + std::to_string(byLine.size()) +
+              " energy-residual series across " + std::to_string(byCrystal.size()) +
+              " calibrated crystal(s) on the 0-63 detector axis.");
 }
 
 void MainWindow::ExportCsv() {

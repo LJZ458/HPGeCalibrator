@@ -35,6 +35,8 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override = default;
     bool OpenRootFiles(const std::vector<std::string>& files);
+    bool SaveProject(const std::string& path, std::string& error) const;
+    bool OpenProject(const std::string& path, std::string& error);
 
 private:
     friend class MainWindowTestAccess;
@@ -72,6 +74,8 @@ private:
     void RefreshEnergyList(QListWidget* list, const QComboBox* sourceCombo,
                            std::vector<std::size_t>& indices);
     void AddRootFiles();
+    void SaveProjectDialog();
+    void OpenProjectDialog();
     void RefreshDatasetWidgets();
     std::vector<int> SelectedDescriptorIndices() const;
     std::vector<int> SelectedCrystals() const;
@@ -106,6 +110,7 @@ private:
     void RefitSelectedCrystal();
     void RefreshResults();
     void ShowSelectedCalibration();
+    void ShowResidualsByCrystal();
     void ExportCsv();
     void SetStatus(const std::string& text);
     void UpdateInteractionMode();
@@ -152,6 +157,7 @@ private:
     QListWidget* resultList_ = nullptr;
     QListWidget* alignmentParameterList_ = nullptr;
     QComboBox* resultSpectrumCombo_ = nullptr;
+    QComboBox* residualDatasetCombo_ = nullptr;
     QComboBox* combinedHistogramCombo_ = nullptr;
     QListWidget* combinedQualityList_ = nullptr;
     QComboBox* manualHistogramCombo_ = nullptr;
