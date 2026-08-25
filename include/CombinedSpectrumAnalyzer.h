@@ -32,6 +32,13 @@ public:
         const std::string& datasetId,
         double expectedEnergy,
         double halfWindowKeV);
+
+    static CombinedPeakQuality EvaluatePeakInRange(
+        const TH1& combinedSpectrum,
+        const std::string& datasetId,
+        double expectedEnergy,
+        double rangeLowKeV,
+        double rangeHighKeV);
 };
 
 } // namespace hpge

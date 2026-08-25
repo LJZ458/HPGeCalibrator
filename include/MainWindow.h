@@ -59,7 +59,13 @@ private:
         std::shared_ptr<TH1D> spectrum;
         std::vector<CombinedPeakQuality> peaks;
         int crystalCount = 0;
+        int spectrumCount = 0;
     };
+    struct CombinedPeakOverride {
+        std::string analysisId;
+        CombinedPeakQuality quality;
+    };
+    enum class RecalibrationMode { RefitAll, KeepAndAdd };
 
     void BuildInterface();
     QWidget* BuildDataTab();
@@ -100,12 +106,17 @@ private:
     void RefreshAlignmentParameterList();
     void RefreshFittedPointList();
     void RefreshManualPeakList();
-    std::vector<CalibrationPoint> BuildPointsForCrystal(int crystal);
-    CalibrationResult CalibrateCrystal(int crystal);
+    std::vector<CalibrationPoint> BuildPointsForCrystal(
+        int crystal, const std::vector<CalibrationPoint>* preserved = nullptr);
+    CalibrationResult CalibrateCrystal(
+        int crystal, RecalibrationMode mode = RecalibrationMode::RefitAll);
     void RunCalibration();
+    void ExecuteCalibration(RecalibrationMode mode);
     void EvaluateCombinedSpectra();
     void RefreshCombinedQualityList();
     void ShowCombinedSpectrum();
+    void BeginCombinedPeakRefit();
+    void CompleteCombinedPeakRefit(double low, double high);
     void ShowSpectrumAlignment();
     void RefitSelectedCrystal();
     void RefreshResults();
@@ -127,10 +138,14 @@ private:
     std::map<int, CalibrationResult> results_;
     std::map<std::pair<int, std::string>, PeakMatchResult> alignmentResults_;
     std::map<std::string, CombinedDatasetAnalysis> combinedAnalyses_;
+    std::vector<CombinedPeakOverride> combinedPeakOverrides_;
     std::shared_ptr<TH1D> displayedSpectrum_;
     std::string displayedDatasetId_;
     int displayedCrystal_ = -1;
     std::optional<double> pendingRangeStart_;
+    bool combinedRefitActive_ = false;
+    std::string combinedRefitAnalysisId_;
+    int combinedRefitPeakIndex_ = -1;
     bool updatingWidgets_ = false;
 
     QTabWidget* tabs_ = nullptr;

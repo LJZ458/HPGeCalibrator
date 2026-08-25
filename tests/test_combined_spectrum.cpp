@@ -48,6 +48,15 @@ int main() {
                   << ", FWHM=" << quality.fwhmKeV << '\n';
         return 1;
     }
+    const auto selectedRangeQuality = hpge::CombinedSpectrumAnalyzer::EvaluatePeakInRange(
+        *combined, "synthetic", 500.0, 493.0, 508.0);
+    if (!selectedRangeQuality.success ||
+        std::abs(selectedRangeQuality.peakFit.rangeLow - 493.0) > 1e-9 ||
+        std::abs(selectedRangeQuality.peakFit.rangeHigh - 508.0) > 1e-9 ||
+        std::abs(selectedRangeQuality.fittedEnergy - 500.0) > 0.5) {
+        std::cerr << "User-selected combined peak interval was not fitted exactly\n";
+        return 1;
+    }
 
     const auto invalid = hpge::CombinedSpectrumAnalyzer::Combine("empty", {}, error);
     if (invalid || error.empty()) {

@@ -39,7 +39,9 @@ The application runs on macOS and Linux with Qt 6 and a CERN ROOT installation. 
 - Applies pending replacements and additions to the existing point set without rerunning automatic peak finding or refitting untouched RadWare peaks. Only the second-order calibration polynomial and residuals are recomputed.
 - Binds manual corrections to the single crystal highlighted in the calibration-results list and labels the correction panel with that crystal number.
 - Extends calibration and residual plot axes beyond the outermost data points so the second-order trend and edge residuals have visual context.
-- After the individual fits, transforms and sums every successful crystal in energy space for each source, refits the combined peaks, and reports centroid residual, FWHM in keV, and percentage energy resolution.
+- During recalibration, asks whether to refit every peak or preserve all stored centroids/fit curves and fit only newly added dataset-energy lines.
+- After the individual fits, provides both per-source sums and one all-selected-sources energy spectrum containing every source/crystal spectrum and every assigned line.
+- Lets the user select a combined-spectrum line, click its two fit limits, and refit only that peak while preserving the other combined fits; manual combined fits survive project save/restore.
 - Exports coefficients, fit statistics, calibration points, peak-fit parameters, manual/automatic status, combined-spectrum residual/FWHM results, and resolution to CSV.
 - Writes a companion C++ header containing three 64-element coefficient arrays—`p0`, `p1`, and `p2`—indexed directly by crystal number.
 
@@ -132,7 +134,8 @@ If Qt reports that the `xcb` platform plugin cannot be initialized on a minimal 
 5. Select a calibration result. **Show all fitted sources** displays every contributing source spectrum as a normalized vertical stack with all fitted peak curves in red. Use the fitted-source selector or **Show selected source** to inspect one spectrum at full count scale.
 6. For any `REVIEW` or `FAIL` result, inspect **Existing fitted peaks** under Manual correction. Selecting a row chooses its dataset and energy and opens that crystal spectrum for replacement. Select a new range to create a pending replacement, or choose another known/custom energy and range to add a point. Remove any unwanted pending item, then press **Apply pending peaks (keep all others)**. Untouched centroids and RadWare fits are preserved; only the calibration polynomial and residuals are recomputed.
 7. Inspect **Fit + residuals**; residual x coordinates are the assigned peak energies rather than charge centroids.
-8. Under **Combined calibrated spectrum quality**, select each source and inspect the summed energy spectrum, combined-line residuals, FWHM, and percentage resolution.
+8. Under **Combined calibrated spectrum quality**, choose **All selected source spectra** to inspect every selected histogram in one energy-space sum, or choose an individual source for diagnosis. Select a listed line and click **Refit selected combined peak**, then click the two desired energy limits.
+9. When running calibration again, choose **Keep fitted peaks + add new** to retain every prior peak fit and process only newly assigned lines, or **Refit all peaks** to replace the automatic peak fits.
 9. Under **Residual overview across detector crystals**, choose all sources or one source and click **Show residuals vs crystals**. The upper plot overlays every energy-line residual on crystal indices 0–63; the lower plot shows each crystal's RMS and largest absolute residual.
 10. Use **File → Save project…** whenever you want a resumable snapshot. After restoring it, existing manual and automatic fits remain available for review and selective correction, and **Add ROOT files…** plus the normal reference-peak controls can extend the analysis before saving again.
 11. Export the complete CSV. The same action also writes `<csv-name>_coefficients.hpp` with separate `p0`, `p1`, and `p2` C++ arrays for crystals 0–63; unfitted crystals contain a `missing` NaN placeholder.

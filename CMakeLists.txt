@@ -163,6 +163,18 @@ if(BUILD_TESTING)
     set_tests_properties(qt-residuals-versus-all-crystals PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         DEPENDS sample-generator)
+    add_test(NAME qt-recalibration-preserves-fitted-peaks
+             COMMAND hpge-gui-alignment-tests
+                     ${CMAKE_CURRENT_BINARY_DIR}/hpge_test_sample.root keep-and-add-recalibration)
+    set_tests_properties(qt-recalibration-preserves-fitted-peaks PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        DEPENDS sample-generator)
+    add_test(NAME qt-all-source-combined-selective-refit
+             COMMAND hpge-gui-alignment-tests
+                     ${CMAKE_CURRENT_BINARY_DIR}/hpge_test_sample.root all-source-combined-refit)
+    set_tests_properties(qt-all-source-combined-selective-refit PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        DEPENDS sample-generator)
 endif()
 
 install(TARGETS hpge-calibrator hpge-generate-sample RUNTIME DESTINATION bin)

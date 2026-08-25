@@ -133,10 +133,10 @@ std::shared_ptr<TH1D> CombinedSpectrumAnalyzer::Combine(
 CombinedPeakQuality CombinedSpectrumAnalyzer::EvaluatePeak(
     const TH1& combinedSpectrum, const std::string& datasetId,
     double expectedEnergy, double halfWindowKeV) {
-    CombinedPeakQuality quality;
-    quality.datasetId = datasetId;
-    quality.expectedEnergy = expectedEnergy;
     if (!(expectedEnergy > 0.0) || !std::isfinite(expectedEnergy)) {
+        CombinedPeakQuality quality;
+        quality.datasetId = datasetId;
+        quality.expectedEnergy = expectedEnergy;
         quality.status = "Expected energy must be positive";
         return quality;
     }
@@ -144,6 +144,26 @@ CombinedPeakQuality CombinedSpectrumAnalyzer::EvaluatePeak(
     const double halfWindow = std::max(std::abs(halfWindowKeV), 8.0 * binWidth);
     const double low = std::max(combinedSpectrum.GetXaxis()->GetXmin(), expectedEnergy - halfWindow);
     const double high = std::min(combinedSpectrum.GetXaxis()->GetXmax(), expectedEnergy + halfWindow);
+    return EvaluatePeakInRange(combinedSpectrum, datasetId, expectedEnergy, low, high);
+}
+
+CombinedPeakQuality CombinedSpectrumAnalyzer::EvaluatePeakInRange(
+    const TH1& combinedSpectrum, const std::string& datasetId,
+    double expectedEnergy, double rangeLowKeV, double rangeHighKeV) {
+    CombinedPeakQuality quality;
+    quality.datasetId = datasetId;
+    quality.expectedEnergy = expectedEnergy;
+    if (!(expectedEnergy > 0.0) || !std::isfinite(expectedEnergy)) {
+        quality.status = "Expected energy must be positive";
+        return quality;
+    }
+    if (!std::isfinite(rangeLowKeV) || !std::isfinite(rangeHighKeV) ||
+        rangeHighKeV <= rangeLowKeV) {
+        quality.status = "Peak-fit range must have two finite increasing limits";
+        return quality;
+    }
+    const double low = std::max(combinedSpectrum.GetXaxis()->GetXmin(), rangeLowKeV);
+    const double high = std::min(combinedSpectrum.GetXaxis()->GetXmax(), rangeHighKeV);
     quality.peakFit = CalibrationEngine::FitRadwarePeak(combinedSpectrum, low, high);
     quality.success = quality.peakFit.success;
     quality.status = quality.peakFit.status;

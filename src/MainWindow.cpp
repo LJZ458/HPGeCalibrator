@@ -18,6 +18,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenuBar>
+#include <QMessageBox>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -40,11 +41,14 @@
 #include <fstream>
 #include <filesystem>
 #include <iomanip>
+#include <numeric>
 #include <set>
 #include <sstream>
 
 namespace hpge {
 namespace {
+
+constexpr const char* kAllCombinedSourcesId = "__all_selected_sources__";
 
 QString Text(const std::string& value) { return QString::fromStdString(value); }
 
@@ -198,6 +202,33 @@ PeakFitResult ReadPeakFit(const QJsonValue& value) {
     fit.chi2 = object["chi2"].toDouble();
     fit.ndf = object["ndf"].toInt();
     return fit;
+}
+
+QJsonObject CombinedPeakQualityJson(const CombinedPeakQuality& quality) {
+    return {{"datasetId", Text(quality.datasetId)},
+            {"expectedEnergy", quality.expectedEnergy},
+            {"fittedEnergy", quality.fittedEnergy},
+            {"residualKeV", quality.residualKeV},
+            {"fwhmKeV", quality.fwhmKeV},
+            {"resolutionPercent", quality.resolutionPercent},
+            {"success", quality.success},
+            {"status", Text(quality.status)},
+            {"peakFit", PeakFitJson(quality.peakFit)}};
+}
+
+CombinedPeakQuality ReadCombinedPeakQuality(const QJsonValue& value) {
+    const auto object = value.toObject();
+    CombinedPeakQuality quality;
+    quality.datasetId = object["datasetId"].toString().toStdString();
+    quality.expectedEnergy = object["expectedEnergy"].toDouble();
+    quality.fittedEnergy = object["fittedEnergy"].toDouble();
+    quality.residualKeV = object["residualKeV"].toDouble();
+    quality.fwhmKeV = object["fwhmKeV"].toDouble();
+    quality.resolutionPercent = object["resolutionPercent"].toDouble();
+    quality.success = object["success"].toBool();
+    quality.status = object["status"].toString().toStdString();
+    quality.peakFit = ReadPeakFit(object["peakFit"]);
+    return quality;
 }
 
 QJsonObject CalibrationPointJson(const CalibrationPoint& point) {
@@ -610,15 +641,23 @@ QWidget* MainWindow::BuildCalibrationTab() {
 
     auto* combined = new QGroupBox("Combined calibrated spectrum quality");
     auto* combinedLayout = new QVBoxLayout(combined);
-    combinedLayout->addWidget(Hint("After calibration, sum all successful crystals in energy space and refit each assigned line."));
+    combinedLayout->addWidget(Hint(
+        "The all-sources view sums every selected source and crystal in energy space. "
+        "Select a listed line to refit only that combined peak with two clicked limits."));
     combinedHistogramCombo_ = new QComboBox;
+    combinedHistogramCombo_->setObjectName("combinedHistogramCombo");
     combinedQualityList_ = new QListWidget;
+    combinedQualityList_->setObjectName("combinedQualityList");
     combinedQualityList_->setMinimumHeight(105);
     auto* showCombined = new QPushButton("Show combined spectrum + energy residuals");
+    showCombined->setObjectName("showCombinedSpectrumButton");
+    auto* refitCombined = new QPushButton("Refit selected combined peak");
+    refitCombined->setObjectName("refitCombinedPeakButton");
     connect(showCombined, &QPushButton::clicked, this, [this] { ShowCombinedSpectrum(); });
+    connect(refitCombined, &QPushButton::clicked, this, [this] { BeginCombinedPeakRefit(); });
     combinedLayout->addWidget(combinedHistogramCombo_);
     combinedLayout->addWidget(combinedQualityList_);
-    combinedLayout->addWidget(showCombined);
+    combinedLayout->addWidget(Row({showCombined, refitCombined}));
     layout->addWidget(combined);
 
     manualCorrectionGroup_ = new QGroupBox("Manual correction — select one calibration result");
@@ -719,7 +758,13 @@ void MainWindow::ConnectActions() {
                   " keV for replacement. Select a new fit range, or choose another energy to add.");
     });
     connect(combinedHistogramCombo_, &QComboBox::currentIndexChanged, this, [this] {
-        if (!updatingWidgets_) RefreshCombinedQualityList();
+        if (!updatingWidgets_) {
+            combinedRefitActive_ = false;
+            combinedRefitAnalysisId_.clear();
+            combinedRefitPeakIndex_ = -1;
+            pendingRangeStart_.reset();
+            RefreshCombinedQualityList();
+        }
     });
     connect(alignmentHistogramCombo_, &QComboBox::currentIndexChanged, this, [this] {
         if (!updatingWidgets_ && alignmentHistogramCombo_->currentIndex() >= 0) {
@@ -1032,6 +1077,14 @@ bool MainWindow::SaveProject(const std::string& path, std::string& error) const 
     }
     root["alignments"] = alignments;
 
+    QJsonArray combinedPeakOverrides;
+    for (const auto& item : combinedPeakOverrides_) {
+        combinedPeakOverrides.append(QJsonObject{
+            {"analysisId", Text(item.analysisId)},
+            {"quality", CombinedPeakQualityJson(item.quality)}});
+    }
+    root["combinedPeakOverrides"] = combinedPeakOverrides;
+
     QSaveFile output(Text(path));
     if (!output.open(QIODevice::WriteOnly)) {
         error = "Could not create project file: " + path;
@@ -1118,6 +1171,7 @@ bool MainWindow::OpenProject(const std::string& path, std::string& error) {
     results_.clear();
     alignmentResults_.clear();
     combinedAnalyses_.clear();
+    combinedPeakOverrides_.clear();
     displayedSpectrum_.reset();
     displayedDatasetId_.clear();
     displayedCrystal_ = -1;
@@ -1258,6 +1312,17 @@ bool MainWindow::OpenProject(const std::string& path, std::string& error) {
             object["datasetId"].toString().toStdString());
         if (crystal >= 0 && crystal < 64 && !datasetId.empty()) {
             alignmentResults_[{crystal, datasetId}] = ReadPeakMatch(object["alignment"]);
+        }
+    }
+    for (const auto value : root["combinedPeakOverrides"].toArray()) {
+        const auto object = value.toObject();
+        const std::string oldAnalysisId = object["analysisId"].toString().toStdString();
+        const std::string analysisId = oldAnalysisId == kAllCombinedSourcesId
+            ? oldAnalysisId : remapDataset(oldAnalysisId);
+        CombinedPeakQuality quality = ReadCombinedPeakQuality(object["quality"]);
+        quality.datasetId = remapDataset(quality.datasetId);
+        if (!analysisId.empty() && !quality.datasetId.empty() && quality.expectedEnergy > 0.0) {
+            combinedPeakOverrides_.push_back({analysisId, std::move(quality)});
         }
     }
 
@@ -1601,15 +1666,34 @@ void MainWindow::UpdateInteractionMode() {
     primaryPlot_->SetInteractionMode(selecting ? SpectrumPlotWidget::InteractionMode::SelectRange
                                                : SpectrumPlotWidget::InteractionMode::ZoomPan);
     secondaryPlot_->SetInteractionMode(SpectrumPlotWidget::InteractionMode::ZoomPan);
-    if (!selecting) pendingRangeStart_.reset();
+    if (!selecting) {
+        pendingRangeStart_.reset();
+        combinedRefitActive_ = false;
+        combinedRefitAnalysisId_.clear();
+        combinedRefitPeakIndex_ = -1;
+    }
     if (displayedSpectrum_) RedrawDisplayedSpectrum();
     SetStatus(selecting ? "Peak-range mode: click two fit limits; wheel zoom and right-drag pan remain available."
                         : "Zoom mode: wheel or buttons zoom, left-drag a window, right-drag pans, double-click resets.");
 }
 
 void MainWindow::HandleRangeClick(double charge) {
-    if (mouseModeCombo_->currentIndex() != 0 || !displayedSpectrum_ ||
-        (tabs_->currentIndex() != 1 && tabs_->currentIndex() != 2)) return;
+    if (mouseModeCombo_->currentIndex() != 0) return;
+    if (combinedRefitActive_) {
+        if (!pendingRangeStart_) {
+            pendingRangeStart_ = charge;
+            ShowCombinedSpectrum();
+            SetStatus("First combined-peak limit selected at " + FormatNumber(charge, 3) +
+                      " keV. Click the other fit limit.");
+            return;
+        }
+        const double low = std::min(*pendingRangeStart_, charge);
+        const double high = std::max(*pendingRangeStart_, charge);
+        pendingRangeStart_.reset();
+        CompleteCombinedPeakRefit(low, high);
+        return;
+    }
+    if (!displayedSpectrum_ || (tabs_->currentIndex() != 1 && tabs_->currentIndex() != 2)) return;
     if (!pendingRangeStart_) {
         pendingRangeStart_ = charge;
         RedrawDisplayedSpectrum();
@@ -1767,8 +1851,14 @@ void MainWindow::RefreshManualPeakList() {
     }
 }
 
-std::vector<CalibrationPoint> MainWindow::BuildPointsForCrystal(int crystal) {
-    std::vector<CalibrationPoint> points;
+std::vector<CalibrationPoint> MainWindow::BuildPointsForCrystal(
+    int crystal, const std::vector<CalibrationPoint>* preserved) {
+    std::vector<CalibrationPoint> points = preserved ? *preserved : std::vector<CalibrationPoint>{};
+    const auto alreadyFitted = [&](const std::string& datasetId, double energy) {
+        return std::any_of(points.begin(), points.end(), [&](const CalibrationPoint& point) {
+            return point.datasetId == datasetId && std::abs(point.energy - energy) < 1e-6;
+        });
+    };
     CalibrationEngine::SearchOptions options;
     options.sigmaBins = sigmaEntry_->value();
     options.threshold = thresholdEntry_->value();
@@ -1778,7 +1868,11 @@ std::vector<CalibrationPoint> MainWindow::BuildPointsForCrystal(int crystal) {
     for (int descriptorIndex : SelectedDescriptorIndices()) {
         const auto& descriptor = descriptors_[descriptorIndex];
         std::vector<ReferencePeak> references;
-        for (const auto& peak : referencePeaks_) if (peak.datasetId == descriptor.id) references.push_back(peak);
+        for (const auto& peak : referencePeaks_) {
+            if (peak.datasetId == descriptor.id && !alreadyFitted(peak.datasetId, peak.energy)) {
+                references.push_back(peak);
+            }
+        }
         if (references.empty()) continue;
         std::sort(references.begin(), references.end(), [](const ReferencePeak& a, const ReferencePeak& b) {
             return a.charge < b.charge;
@@ -1830,16 +1924,42 @@ std::vector<CalibrationPoint> MainWindow::BuildPointsForCrystal(int crystal) {
         CalibrationPoint replacement{manual.datasetId, manual.peakFit.centroid, manual.energy,
                                      manual.peakFit.centroidError, true, 0.0, manual.peakFit};
         if (existing == points.end()) points.push_back(replacement);
-        else *existing = replacement;
+        else if (!preserved) *existing = replacement;
     }
     return points;
 }
 
-CalibrationResult MainWindow::CalibrateCrystal(int crystal) {
-    return CalibrationEngine::FitSecondOrder(crystal, BuildPointsForCrystal(crystal), residualLimitEntry_->value());
+CalibrationResult MainWindow::CalibrateCrystal(int crystal, RecalibrationMode mode) {
+    const auto existing = results_.find(crystal);
+    const std::vector<CalibrationPoint>* preserved =
+        mode == RecalibrationMode::KeepAndAdd && existing != results_.end()
+        ? &existing->second.points : nullptr;
+    return CalibrationEngine::FitSecondOrder(
+        crystal, BuildPointsForCrystal(crystal, preserved), residualLimitEntry_->value());
 }
 
 void MainWindow::RunCalibration() {
+    if (results_.empty()) {
+        ExecuteCalibration(RecalibrationMode::RefitAll);
+        return;
+    }
+    QMessageBox question(this);
+    question.setWindowTitle("Recalibrate crystals");
+    question.setIcon(QMessageBox::Question);
+    question.setText("Existing fitted peaks are available. How should recalibration proceed?");
+    question.setInformativeText(
+        "Keep fitted peaks preserves every saved centroid and fit curve, then fits only new "
+        "dataset/energy lines. Refit all replaces the existing automatic peak fits.");
+    auto* keep = question.addButton("Keep fitted peaks + add new", QMessageBox::AcceptRole);
+    auto* refit = question.addButton("Refit all peaks", QMessageBox::DestructiveRole);
+    question.addButton(QMessageBox::Cancel);
+    question.setDefaultButton(keep);
+    question.exec();
+    if (question.clickedButton() == keep) ExecuteCalibration(RecalibrationMode::KeepAndAdd);
+    else if (question.clickedButton() == refit) ExecuteCalibration(RecalibrationMode::RefitAll);
+}
+
+void MainWindow::ExecuteCalibration(RecalibrationMode mode) {
     const auto datasets = SelectedDescriptorIndices();
     const auto crystals = SelectedCrystals();
     if (datasets.empty() || crystals.empty()) {
@@ -1855,12 +1975,20 @@ void MainWindow::RunCalibration() {
         SetStatus("At least three reference peaks across the selected histograms are required.");
         return;
     }
-    SetStatus("Calibrating " + std::to_string(crystals.size()) + " crystals...");
+    const std::size_t previousPointCount = std::accumulate(
+        results_.begin(), results_.end(), std::size_t{0},
+        [](std::size_t count, const auto& entry) { return count + entry.second.points.size(); });
+    SetStatus((mode == RecalibrationMode::KeepAndAdd ? "Keeping fitted peaks and adding new lines for "
+                                                     : "Refitting all peaks for ") +
+              std::to_string(crystals.size()) + " crystals...");
     QApplication::processEvents();
-    results_.clear();
-    alignmentResults_.clear();
+    if (mode == RecalibrationMode::RefitAll) {
+        results_.clear();
+        alignmentResults_.clear();
+        combinedPeakOverrides_.clear();
+    }
     for (int crystal : crystals) {
-        results_[crystal] = CalibrateCrystal(crystal);
+        results_[crystal] = CalibrateCrystal(crystal, mode);
         QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
     }
     RefreshResults();
@@ -1872,7 +2000,16 @@ void MainWindow::RunCalibration() {
         else if (result.needsReview) ++review;
         else ++ok;
     }
-    SetStatus("Calibration complete: " + std::to_string(ok) + " OK, " +
+    const std::size_t currentPointCount = std::accumulate(
+        results_.begin(), results_.end(), std::size_t{0},
+        [](std::size_t count, const auto& entry) { return count + entry.second.points.size(); });
+    const std::size_t added = currentPointCount > previousPointCount
+        ? currentPointCount - previousPointCount : 0;
+    SetStatus("Calibration complete" +
+              (mode == RecalibrationMode::KeepAndAdd
+                   ? "; preserved existing fits and added " + std::to_string(added) + " peak(s)"
+                   : std::string()) +
+              ": " + std::to_string(ok) + " OK, " +
               std::to_string(review) + " review, " + std::to_string(failed) + " failed.");
 }
 
@@ -1883,33 +2020,22 @@ void MainWindow::EvaluateCombinedSpectra() {
     combinedQualityList_->clear();
     updatingWidgets_ = false;
 
-    for (int descriptorIndex : SelectedDescriptorIndices()) {
-        const auto& descriptor = descriptors_[descriptorIndex];
-        std::vector<std::shared_ptr<TH1D>> ownedSpectra;
-        std::vector<CalibratedSpectrumInput> inputs;
-        for (const auto& [crystal, result] : results_) {
-            if (!result.success) continue;
-            std::string error;
-            auto spectrum = repository_.ProjectCrystal(descriptor, crystal, Orientation(), error);
-            if (!spectrum) continue;
-            inputs.push_back({spectrum.get(), result.p0, result.p1, result.p2});
-            ownedSpectra.push_back(std::move(spectrum));
-        }
-        std::string error;
-        auto combined = CombinedSpectrumAnalyzer::Combine(descriptor.id, inputs, error);
-        if (!combined) continue;
-
+    std::vector<std::shared_ptr<TH1D>> allOwnedSpectra;
+    std::vector<CalibratedSpectrumInput> allInputs;
+    std::set<int> allCrystals;
+    const auto buildAnalysis = [&](const std::string& analysisId,
+                                   std::shared_ptr<TH1D> spectrum,
+                                   int crystalCount, int spectrumCount,
+                                   std::vector<const ReferencePeak*> references) {
         CombinedDatasetAnalysis analysis;
-        analysis.datasetId = descriptor.id;
-        analysis.spectrum = std::move(combined);
-        analysis.crystalCount = static_cast<int>(inputs.size());
-        std::vector<const ReferencePeak*> references;
-        for (const auto& reference : referencePeaks_) {
-            if (reference.datasetId == descriptor.id) references.push_back(&reference);
-        }
+        analysis.datasetId = analysisId;
+        analysis.spectrum = std::move(spectrum);
+        analysis.crystalCount = crystalCount;
+        analysis.spectrumCount = spectrumCount;
         std::sort(references.begin(), references.end(), [](const ReferencePeak* first,
                                                             const ReferencePeak* second) {
-            return first->energy < second->energy;
+            if (first->energy != second->energy) return first->energy < second->energy;
+            return first->datasetId < second->datasetId;
         });
         for (const ReferencePeak* reference : references) {
             double halfWindow = 10.0;
@@ -1925,11 +2051,64 @@ void MainWindow::EvaluateCombinedSpectra() {
                     std::abs(energyAt(reference->peakFit.rangeHigh) - reference->energy));
                 halfWindow = std::clamp(halfWindow, 4.0, 100.0);
             }
-            analysis.peaks.push_back(CombinedSpectrumAnalyzer::EvaluatePeak(
-                *analysis.spectrum, descriptor.id, reference->energy, halfWindow));
+            auto quality = CombinedSpectrumAnalyzer::EvaluatePeak(
+                *analysis.spectrum, reference->datasetId, reference->energy, halfWindow);
+            const auto saved = std::find_if(
+                combinedPeakOverrides_.begin(), combinedPeakOverrides_.end(),
+                [&](const CombinedPeakOverride& item) {
+                    return item.analysisId == analysisId &&
+                           item.quality.datasetId == reference->datasetId &&
+                           std::abs(item.quality.expectedEnergy - reference->energy) < 1e-6;
+                });
+            if (saved != combinedPeakOverrides_.end()) quality = saved->quality;
+            analysis.peaks.push_back(std::move(quality));
         }
-        combinedAnalyses_[descriptor.id] = std::move(analysis);
+        combinedAnalyses_[analysisId] = std::move(analysis);
+    };
+
+    for (int descriptorIndex : SelectedDescriptorIndices()) {
+        const auto& descriptor = descriptors_[descriptorIndex];
+        std::vector<std::shared_ptr<TH1D>> ownedSpectra;
+        std::vector<CalibratedSpectrumInput> inputs;
+        for (const auto& [crystal, result] : results_) {
+            if (!result.success) continue;
+            std::string error;
+            auto spectrum = repository_.ProjectCrystal(descriptor, crystal, Orientation(), error);
+            if (!spectrum) continue;
+            inputs.push_back({spectrum.get(), result.p0, result.p1, result.p2});
+            allInputs.push_back({spectrum.get(), result.p0, result.p1, result.p2});
+            allCrystals.insert(crystal);
+            allOwnedSpectra.push_back(spectrum);
+            ownedSpectra.push_back(std::move(spectrum));
+        }
+        std::string error;
+        auto combined = CombinedSpectrumAnalyzer::Combine(descriptor.id, inputs, error);
+        if (!combined) continue;
+
+        std::vector<const ReferencePeak*> references;
+        for (const auto& reference : referencePeaks_) {
+            if (reference.datasetId == descriptor.id) references.push_back(&reference);
+        }
+        buildAnalysis(descriptor.id, std::move(combined), static_cast<int>(inputs.size()),
+                      static_cast<int>(inputs.size()), std::move(references));
         combinedHistogramCombo_->addItem(Text(descriptor.displayName), Text(descriptor.id));
+    }
+    std::string allError;
+    auto allCombined = CombinedSpectrumAnalyzer::Combine(
+        kAllCombinedSourcesId, allInputs, allError);
+    if (allCombined) {
+        std::vector<const ReferencePeak*> allReferences;
+        const auto selected = SelectedDescriptorIndices();
+        std::set<std::string> selectedIds;
+        for (int index : selected) selectedIds.insert(descriptors_[index].id);
+        for (const auto& reference : referencePeaks_) {
+            if (selectedIds.count(reference.datasetId) != 0) allReferences.push_back(&reference);
+        }
+        buildAnalysis(kAllCombinedSourcesId, std::move(allCombined),
+                      static_cast<int>(allCrystals.size()), static_cast<int>(allInputs.size()),
+                      std::move(allReferences));
+        combinedHistogramCombo_->insertItem(
+            0, "All selected source spectra", Text(kAllCombinedSourcesId));
     }
     if (combinedHistogramCombo_->count() > 0) combinedHistogramCombo_->setCurrentIndex(0);
     RefreshCombinedQualityList();
@@ -1941,13 +2120,18 @@ void MainWindow::RefreshCombinedQualityList() {
     const auto found = combinedAnalyses_.find(datasetId);
     if (found == combinedAnalyses_.end()) return;
     for (const auto& peak : found->second.peaks) {
+        const auto descriptor = std::find_if(descriptors_.begin(), descriptors_.end(),
+            [&](const HistogramDescriptor& item) { return item.id == peak.datasetId; });
+        const std::string source = descriptor == descriptors_.end()
+            ? peak.datasetId : descriptor->displayName;
+        const std::string prefix = datasetId == kAllCombinedSourcesId ? source + " | " : "";
         if (!peak.success) {
-            combinedQualityList_->addItem(Text("FAIL | " + FormatNumber(peak.expectedEnergy, 3) +
+            combinedQualityList_->addItem(Text(prefix + "FAIL | " + FormatNumber(peak.expectedEnergy, 3) +
                 " keV | " + peak.status));
             continue;
         }
         combinedQualityList_->addItem(Text(
-            FormatNumber(peak.expectedEnergy, 3) + " keV | centroid " +
+            prefix + FormatNumber(peak.expectedEnergy, 3) + " keV | centroid " +
             FormatNumber(peak.fittedEnergy, 3) + " | residual " +
             FormatNumber(peak.residualKeV, 3) + " keV | FWHM " +
             FormatNumber(peak.fwhmKeV, 3) + " keV | resolution " +
@@ -1964,8 +2148,9 @@ void MainWindow::ShowCombinedSpectrum() {
     }
     const auto descriptor = std::find_if(descriptors_.begin(), descriptors_.end(),
         [&](const HistogramDescriptor& item) { return item.id == datasetId; });
-    const std::string datasetName = descriptor == descriptors_.end()
-        ? datasetId : descriptor->displayName;
+    const std::string datasetName = datasetId == kAllCombinedSourcesId
+        ? "all selected source spectra"
+        : (descriptor == descriptors_.end() ? datasetId : descriptor->displayName);
     std::vector<PlotSeries> spectrumSeries{
         HistogramSeries(*found->second.spectrum, QColor("#2563eb"), "Combined spectrum")};
     std::vector<PlotMarker> markers;
@@ -1985,10 +2170,13 @@ void MainWindow::ShowCombinedSpectrum() {
         residuals.x.push_back(peak.expectedEnergy);
         residuals.y.push_back(peak.residualKeV);
     }
+    if (combinedRefitActive_ && pendingRangeStart_) {
+        markers.push_back({*pendingRangeStart_, "first fit limit", QColor("#d97706"), true});
+    }
     displayedSpectrum_.reset();
     displayedDatasetId_.clear();
     displayedCrystal_ = -1;
-    pendingRangeStart_.reset();
+    if (!combinedRefitActive_) pendingRangeStart_.reset();
     SetSecondaryPlotVisible(true);
     primaryPlot_->SetPlot("Combined calibrated spectrum — " + datasetName,
                           "Energy (keV)", "Counts", std::move(spectrumSeries),
@@ -2000,8 +2188,69 @@ void MainWindow::ShowCombinedSpectrum() {
     } else {
         secondaryPlot_->Clear("No combined peaks were fitted");
     }
-    SetStatus("Combined " + std::to_string(found->second.crystalCount) +
-              " calibrated crystals and refitted " + std::to_string(successful) + " peak(s).");
+    SetStatus("Combined " + std::to_string(found->second.spectrumCount) +
+              " source/crystal spectra from " + std::to_string(found->second.crystalCount) +
+              " calibrated crystal(s) and fitted " + std::to_string(successful) + " peak(s).");
+}
+
+void MainWindow::BeginCombinedPeakRefit() {
+    const std::string analysisId = combinedHistogramCombo_->currentData().toString().toStdString();
+    const auto analysis = combinedAnalyses_.find(analysisId);
+    const int peakIndex = combinedQualityList_->currentRow();
+    if (analysis == combinedAnalyses_.end() || !analysis->second.spectrum ||
+        peakIndex < 0 || peakIndex >= static_cast<int>(analysis->second.peaks.size())) {
+        SetStatus("Select a combined-spectrum peak row before starting its refit.");
+        return;
+    }
+    ShowCombinedSpectrum();
+    combinedRefitActive_ = true;
+    combinedRefitAnalysisId_ = analysisId;
+    combinedRefitPeakIndex_ = peakIndex;
+    pendingRangeStart_.reset();
+    mouseModeCombo_->setCurrentIndex(0);
+    SetStatus("Combined-peak refit is active. Click the two energy limits around the selected peak.");
+}
+
+void MainWindow::CompleteCombinedPeakRefit(double low, double high) {
+    const auto analysis = combinedAnalyses_.find(combinedRefitAnalysisId_);
+    if (analysis == combinedAnalyses_.end() || !analysis->second.spectrum ||
+        combinedRefitPeakIndex_ < 0 ||
+        combinedRefitPeakIndex_ >= static_cast<int>(analysis->second.peaks.size())) {
+        combinedRefitActive_ = false;
+        SetStatus("The selected combined spectrum is no longer available.");
+        return;
+    }
+    const double minimumWidth = 12.0 * analysis->second.spectrum->GetXaxis()->GetBinWidth(1);
+    if (high - low < minimumWidth) {
+        SetStatus("Combined peak-fit interval is too narrow; select at least 12 histogram bins.");
+        return;
+    }
+    auto& peak = analysis->second.peaks[static_cast<std::size_t>(combinedRefitPeakIndex_)];
+    const auto quality = CombinedSpectrumAnalyzer::EvaluatePeakInRange(
+        *analysis->second.spectrum, peak.datasetId, peak.expectedEnergy, low, high);
+    if (!quality.success) {
+        SetStatus("Combined peak fit failed: " + quality.status + ". Select another range.");
+        return;
+    }
+    peak = quality;
+    auto saved = std::find_if(combinedPeakOverrides_.begin(), combinedPeakOverrides_.end(),
+        [&](const CombinedPeakOverride& item) {
+            return item.analysisId == combinedRefitAnalysisId_ &&
+                   item.quality.datasetId == quality.datasetId &&
+                   std::abs(item.quality.expectedEnergy - quality.expectedEnergy) < 1e-6;
+        });
+    CombinedPeakOverride replacement{combinedRefitAnalysisId_, quality};
+    if (saved == combinedPeakOverrides_.end()) combinedPeakOverrides_.push_back(std::move(replacement));
+    else *saved = std::move(replacement);
+    const int selectedRow = combinedRefitPeakIndex_;
+    combinedRefitActive_ = false;
+    combinedRefitAnalysisId_.clear();
+    combinedRefitPeakIndex_ = -1;
+    RefreshCombinedQualityList();
+    combinedQualityList_->setCurrentRow(selectedRow);
+    ShowCombinedSpectrum();
+    SetStatus("Updated only the selected combined peak from " + FormatNumber(low, 3) +
+              " to " + FormatNumber(high, 3) + " keV; all other combined fits were preserved.");
 }
 
 void MainWindow::ShowSpectrumAlignment() {
@@ -2367,11 +2616,12 @@ void MainWindow::ExportCsv() {
         }
     }
     for (const auto& [datasetId, analysis] : combinedAnalyses_) {
+        (void)datasetId;
         for (const auto& peak : analysis.peaks) {
             std::vector<std::string> row(28);
             row[0] = "combined_peak";
             row[2] = peak.status;
-            row[10] = datasetId;
+            row[10] = peak.datasetId;
             row[12] = FormatPrecise(peak.expectedEnergy);
             if (peak.success) {
                 row[13] = FormatPrecise(peak.residualKeV);

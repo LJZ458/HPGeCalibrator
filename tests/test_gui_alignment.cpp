@@ -18,6 +18,7 @@
 #include <cmath>
 #include <iostream>
 #include <iterator>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -181,6 +182,89 @@ public:
         return true;
     }
 
+    static bool VerifyKeepAndAddRecalibration(MainWindow& window) {
+        if (!RunDirectAlignedRangeCalibration(window, 3, 18.0)) return false;
+        window.crystalList_->clearSelection();
+        window.crystalList_->item(3)->setSelected(true);
+        auto existing = window.results_.find(3);
+        if (existing == window.results_.end() || existing->second.points.size() != 6) return false;
+        const CalibrationPoint missing = existing->second.points.back();
+        existing->second.points.pop_back();
+        existing->second = CalibrationEngine::FitSecondOrder(
+            3, existing->second.points, window.residualLimitEntry_->value());
+        if (!existing->second.success || existing->second.points.size() != 5) return false;
+        existing->second.points.front().manual = true;
+        existing->second.points.front().peakFit.status = "must remain byte-for-byte fitted";
+        existing->second.points.front().peakFit.tailFraction = 0.123456789;
+        const CalibrationPoint preserved = existing->second.points.front();
+
+        window.ExecuteCalibration(MainWindow::RecalibrationMode::KeepAndAdd);
+        const auto updated = window.results_.find(3);
+        if (updated == window.results_.end() || updated->second.points.size() != 6) return false;
+        const auto kept = std::find_if(updated->second.points.begin(), updated->second.points.end(),
+            [&](const CalibrationPoint& point) {
+                return point.datasetId == preserved.datasetId &&
+                       std::abs(point.energy - preserved.energy) < 1e-9;
+            });
+        const auto added = std::find_if(updated->second.points.begin(), updated->second.points.end(),
+            [&](const CalibrationPoint& point) {
+                return point.datasetId == missing.datasetId &&
+                       std::abs(point.energy - missing.energy) < 1e-9;
+            });
+        return kept != updated->second.points.end() && added != updated->second.points.end() &&
+               kept->manual == preserved.manual && kept->charge == preserved.charge &&
+               kept->chargeError == preserved.chargeError &&
+               kept->peakFit.status == preserved.peakFit.status &&
+               kept->peakFit.centroid == preserved.peakFit.centroid &&
+               kept->peakFit.rangeLow == preserved.peakFit.rangeLow &&
+               kept->peakFit.rangeHigh == preserved.peakFit.rangeHigh &&
+               kept->peakFit.tailFraction == preserved.peakFit.tailFraction &&
+               window.statusLabel_->text().contains("preserved existing fits and added 1 peak(s)");
+    }
+
+    static bool VerifyAllSourceCombinedAndSelectiveRefit(MainWindow& window) {
+        if (!RunDirectAlignedRangeCalibration(window, 3, 18.0)) return false;
+        window.EvaluateCombinedSpectra();
+        const auto all = window.combinedAnalyses_.find("__all_selected_sources__");
+        if (all == window.combinedAnalyses_.end() || !all->second.spectrum ||
+            all->second.spectrumCount != 2 || all->second.crystalCount != 1 ||
+            all->second.peaks.size() != window.referencePeaks_.size() ||
+            window.combinedHistogramCombo_->count() != 3 ||
+            window.combinedHistogramCombo_->itemData(0).toString() !=
+                "__all_selected_sources__") return false;
+        std::set<std::string> sources;
+        for (const auto& peak : all->second.peaks) sources.insert(peak.datasetId);
+        if (sources.size() != 2) return false;
+        const auto successful = std::find_if(
+            all->second.peaks.begin(), all->second.peaks.end(),
+            [](const CombinedPeakQuality& peak) { return peak.success; });
+        if (successful == all->second.peaks.end()) return false;
+        const int index = static_cast<int>(std::distance(all->second.peaks.begin(), successful));
+        std::vector<PeakFitResult> otherFits;
+        for (std::size_t i = 0; i < all->second.peaks.size(); ++i) {
+            if (static_cast<int>(i) != index) otherFits.push_back(all->second.peaks[i].peakFit);
+        }
+        window.combinedRefitActive_ = true;
+        window.combinedRefitAnalysisId_ = "__all_selected_sources__";
+        window.combinedRefitPeakIndex_ = index;
+        window.CompleteCombinedPeakRefit(successful->peakFit.rangeLow,
+                                         successful->peakFit.rangeHigh);
+        if (window.combinedPeakOverrides_.size() != 1 || window.combinedRefitActive_) return false;
+        const auto refreshed = window.combinedAnalyses_.find("__all_selected_sources__");
+        if (refreshed == window.combinedAnalyses_.end()) return false;
+        std::size_t other = 0;
+        for (std::size_t i = 0; i < refreshed->second.peaks.size(); ++i) {
+            if (static_cast<int>(i) == index) continue;
+            if (refreshed->second.peaks[i].peakFit.centroid != otherFits[other].centroid ||
+                refreshed->second.peaks[i].peakFit.rangeLow != otherFits[other].rangeLow ||
+                refreshed->second.peaks[i].peakFit.rangeHigh != otherFits[other].rangeHigh) {
+                return false;
+            }
+            ++other;
+        }
+        return window.statusLabel_->text().contains("all other combined fits were preserved");
+    }
+
     static bool PrepareCompleteProject(MainWindow& window) {
         if (!InstallTwoSourceResult(window) ||
             !ApplySelectiveReplacementAndAddition(window)) return false;
@@ -233,6 +317,18 @@ public:
         pending.peakFit.chi2 = 18.5;
         pending.peakFit.ndf = 31;
         window.manualPeaks_.push_back(std::move(pending));
+        CombinedPeakQuality combinedQuality;
+        combinedQuality.datasetId = window.descriptors_.front().id;
+        combinedQuality.expectedEnergy = 1234.5;
+        combinedQuality.fittedEnergy = 1234.7;
+        combinedQuality.residualKeV = 0.2;
+        combinedQuality.fwhmKeV = 2.8;
+        combinedQuality.resolutionPercent = 0.23;
+        combinedQuality.success = true;
+        combinedQuality.status = "saved combined manual fit";
+        combinedQuality.peakFit = window.manualPeaks_.back().peakFit;
+        window.combinedPeakOverrides_.push_back(
+            {"__all_selected_sources__", std::move(combinedQuality)});
         window.energyLines_.push_back({2222.75, "project-only custom", "Custom", false});
         window.PopulateEnergyLines();
         window.histogramList_->selectAll();
@@ -259,7 +355,8 @@ public:
             window.SelectedDescriptorIndices().size() != 2 ||
             window.SelectedCrystals() != std::vector<int>({3, 7}) ||
             window.referencePeaks_.size() != 2 || window.manualPeaks_.size() != 1 ||
-            window.results_.size() != 1 || window.alignmentResults_.size() != 2) return false;
+            window.results_.size() != 1 || window.alignmentResults_.size() != 2 ||
+            window.combinedPeakOverrides_.size() != 1) return false;
         const auto result = window.results_.find(3);
         if (result == window.results_.end() || result->second.points.size() != 5) return false;
         const int appliedManual = static_cast<int>(std::count_if(
@@ -279,6 +376,12 @@ public:
                pending.peakFit.rangeHigh == 2900.0 &&
                pending.peakFit.centroid == 2875.25 &&
                pending.peakFit.sigma == 4.2 && pending.peakFit.ndf == 31 &&
+               window.combinedPeakOverrides_.front().analysisId ==
+                   "__all_selected_sources__" &&
+               window.combinedPeakOverrides_.front().quality.datasetId ==
+                   window.descriptors_.front().id &&
+               window.combinedPeakOverrides_.front().quality.status ==
+                   "saved combined manual fit" &&
                window.sigmaEntry_->value() == 3.4 &&
                window.thresholdEntry_->value() == 0.027 &&
                window.residualLimitEntry_->value() == 2.75 &&
@@ -639,6 +742,22 @@ bool TestResidualsByCrystal(hpge::MainWindow& window,
     return true;
 }
 
+bool TestKeepAndAddRecalibration(hpge::MainWindow& window,
+                                 QApplication& application) {
+    const bool passed = hpge::MainWindowTestAccess::VerifyKeepAndAddRecalibration(window);
+    application.processEvents();
+    if (!passed) std::cerr << "Keep-and-add recalibration replaced or lost a fitted peak\n";
+    return passed;
+}
+
+bool TestAllSourceCombinedRefit(hpge::MainWindow& window,
+                                QApplication& application) {
+    const bool passed = hpge::MainWindowTestAccess::VerifyAllSourceCombinedAndSelectiveRefit(window);
+    application.processEvents();
+    if (!passed) std::cerr << "All-source combination or selective combined refit failed\n";
+    return passed;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -680,11 +799,16 @@ int main(int argc, char** argv) {
                                   window, application, argv[1])
                             : mode == "residuals-by-crystal"
                                 ? TestResidualsByCrystal(window, application)
-                                : false;
+                                : mode == "keep-and-add-recalibration"
+                                    ? TestKeepAndAddRecalibration(window, application)
+                                    : mode == "all-source-combined-refit"
+                                        ? TestAllSourceCombinedRefit(window, application)
+                                        : false;
     if (!passed && mode != "alignment-preview" && mode != "result-review" &&
         mode != "selective-refit" && mode != "custom-peak-persistence" &&
         mode != "direct-aligned-fit" && mode != "project-persistence" &&
-        mode != "residuals-by-crystal") {
+        mode != "residuals-by-crystal" && mode != "keep-and-add-recalibration" &&
+        mode != "all-source-combined-refit") {
         std::cerr << "Unknown GUI test mode: " << mode << '\n';
         return 2;
     }
